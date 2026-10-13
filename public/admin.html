@@ -65,6 +65,15 @@
       </div>
       <div id="blocks" style="margin-top:12px"></div>
     </div>
+    <div class="card">
+      <h2>Cliente esqueceu a senha</h2>
+      <p class="muted" style="margin:0 0 10px">Digite o WhatsApp da conta do cliente, gere um código e mande para ele. O código vale 30 minutos.</p>
+      <div class="row">
+        <input class="grow" id="rPhone" type="tel" placeholder="(11) 90000-0000">
+        <button class="gold" id="rGo">Gerar código</button>
+      </div>
+      <div id="rOut" class="item hide" style="margin-top:10px"></div>
+    </div>
     <div class="err" id="err"></div>
     <p class="muted"><a href="#" id="logout">Sair</a></p>
   </div>
@@ -128,6 +137,19 @@ async function run(fn) { $('err').textContent = ''; try { await fn(); await load
 const act1 = (id, what) => run(() => api(`/api/admin/booking/${id}/${what}`, 'POST'));
 
 $('bAdd').onclick = () => run(() => api('/api/admin/block', 'POST', { date: $('bDate').value, time: $('bTime').value || null }));
+$('rGo').onclick = async () => {
+  $('err').textContent = ''; $('rOut').classList.add('hide');
+  try {
+    const r = await api('/api/admin/reset-code', 'POST', { phone: $('rPhone').value });
+    const msg = `Olá, ${r.name.split(' ')[0]}! Seu código para criar uma nova senha no site da Thiago Barbearia é ${r.code}. Ele vale por ${r.minutes} minutos.`;
+    const O = $('rOut'); O.innerHTML = '';
+    const c = document.createElement('div'); c.className = 'time'; c.textContent = r.code;
+    const n = document.createElement('div'); n.className = 'muted'; n.textContent = `${r.name} · ${phoneFmt(r.phone)}`;
+    const a = document.createElement('a'); a.textContent = 'Enviar pelo WhatsApp'; a.target = '_blank'; a.rel = 'noopener';
+    a.href = 'https://wa.me/55' + r.phone + '?text=' + encodeURIComponent(msg);
+    O.append(c, n, a); O.classList.remove('hide');
+  } catch (e) { $('err').textContent = e.message; }
+};
 $('reload').onclick = () => run(async () => {});
 $('enter').onclick = async () => {
   pw = $('pw').value; $('loginErr').textContent = '';

@@ -97,8 +97,41 @@
       <label for="aPass">Senha</label>
       <input id="aPass" type="password" autocomplete="current-password" maxlength="100" placeholder="Mínimo 6 caracteres">
       <button class="btn" id="authGo">Entrar</button>
+      <p class="center" style="margin:12px 0 0"><button class="link" id="forgot">Esqueci minha senha</button></p>
       <button class="btn alt" id="authBack">Voltar</button>
       <div class="err" id="authErr"></div>
+    </div>
+  </div>
+
+  <!-- Esqueci a senha -->
+  <div id="stepReset" class="hide">
+    <div class="card">
+      <h2>Criar uma nova senha</h2>
+      <p class="summary">Peça ao Thiago um código pelo WhatsApp. Ele vale por 30 minutos.</p>
+      <a class="btn alt hide" id="askCode" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">Pedir código no WhatsApp</a>
+      <label for="rPhone">Seu WhatsApp (com DDD)</label>
+      <input id="rPhone" type="tel" autocomplete="tel" placeholder="(11) 90000-0000">
+      <label for="rCode">Código</label>
+      <input id="rCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 números">
+      <label for="rPass">Nova senha</label>
+      <input id="rPass" type="password" autocomplete="new-password" maxlength="100" placeholder="Mínimo 6 caracteres">
+      <button class="btn" id="resetGo">Salvar nova senha</button>
+      <button class="btn alt" id="resetBack">Voltar</button>
+      <div class="err" id="resetErr"></div>
+    </div>
+  </div>
+
+  <!-- Trocar senha (logado) -->
+  <div id="stepPass" class="hide">
+    <div class="card">
+      <h2>Trocar senha</h2>
+      <label for="pCur">Senha atual</label>
+      <input id="pCur" type="password" autocomplete="current-password" maxlength="100">
+      <label for="pNew">Nova senha</label>
+      <input id="pNew" type="password" autocomplete="new-password" maxlength="100" placeholder="Mínimo 6 caracteres">
+      <button class="btn" id="passGo">Salvar nova senha</button>
+      <button class="btn alt" id="passBack">Voltar</button>
+      <div class="err" id="passErr"></div>
     </div>
   </div>
 
@@ -108,7 +141,9 @@
       <h2 id="histHello">Meus agendamentos</h2>
       <div id="histList"><span class="summary">Carregando…</span></div>
       <button class="btn" id="histNew">Fazer novo agendamento</button>
+      <button class="btn alt" id="changePass">Trocar senha</button>
       <button class="btn alt" id="logout">Sair da conta</button>
+      <p class="summary center hide" id="passOk" style="margin-top:12px;color:var(--ok)">Senha alterada.</p>
     </div>
   </div>
 
@@ -156,7 +191,7 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error(j.error || 'Algo deu errado. Tente novamente.');
   return j;
 }
-function show(step) { for (const s of ['stepPick','stepPay','stepDone','stepLogin','stepHistory']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
+function show(step) { for (const s of ['stepPick','stepPay','stepDone','stepLogin','stepHistory','stepReset','stepPass']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
 
 async function init() {
   cfg = await api('/api/config');
@@ -311,6 +346,39 @@ $('logout').onclick = async () => {
   try { await api('/api/auth/logout', { method:'POST' }); } catch (_) {}
   setToken(null); $('name').value = ''; $('phone').value = ''; applyUser(); backToStart();
 };
+$('forgot').onclick = () => {
+  $('rPhone').value = $('aPhone').value; $('rCode').value = ''; $('rPass').value = ''; $('resetErr').textContent = '';
+  if (cfg.whatsapp) {
+    $('askCode').href = 'https://wa.me/' + (cfg.whatsapp.length <= 11 ? '55' + cfg.whatsapp : cfg.whatsapp) +
+      '?text=' + encodeURIComponent('Olá! Esqueci a senha do site de agendamento. Pode me mandar um código para criar uma nova?');
+    $('askCode').classList.remove('hide');
+  }
+  show('stepReset');
+};
+$('resetBack').onclick = () => show('stepLogin');
+$('resetGo').onclick = async () => {
+  $('resetErr').textContent = ''; $('resetGo').disabled = true;
+  try {
+    const r = await api('/api/auth/reset', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ phone: $('rPhone').value, code: $('rCode').value, password: $('rPass').value }) });
+    setToken(r.token); user = r.user; $('rPass').value = '';
+    applyUser(); await openHistory(); $('passOk').classList.remove('hide');
+  } catch (e) { $('resetErr').textContent = e.message; }
+  $('resetGo').disabled = false;
+};
+$('changePass').onclick = () => { $('pCur').value = ''; $('pNew').value = ''; $('passErr').textContent = ''; show('stepPass'); };
+$('passBack').onclick = () => openHistory();
+$('passGo').onclick = async () => {
+  $('passErr').textContent = ''; $('passGo').disabled = true;
+  try {
+    const r = await api('/api/auth/password', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ current: $('pCur').value, password: $('pNew').value }) });
+    setToken(r.token); user = r.user; $('pCur').value = ''; $('pNew').value = '';
+    await openHistory(); $('passOk').classList.remove('hide');
+  } catch (e) { $('passErr').textContent = e.message; }
+  $('passGo').disabled = false;
+};
+
 $('histNew').onclick = () => { try { localStorage.removeItem('tb_booking'); } catch (_) {} booking = null; backToStart(); };
 
 const HIST = {
@@ -318,7 +386,7 @@ const HIST = {
   done: ['b-muted','Realizado'], expired: ['b-bad','Expirado'], cancelled: ['b-bad','Cancelado']
 };
 async function openHistory() {
-  show('stepHistory');
+  show('stepHistory'); $('passOk').classList.add('hide');
   $('histHello').textContent = `Olá, ${user.name.split(' ')[0]}! Seus agendamentos`;
   $('histList').innerHTML = '<span class="summary">Carregando…</span>';
   try {

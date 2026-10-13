@@ -13,9 +13,12 @@
   também entra, se o cliente criar a conta ou entrar **no mesmo aparelho** logo depois de agendar.
 - A senha é guardada só como hash (scrypt), nunca em texto. Depois de 10 senhas erradas, o login
   daquele WhatsApp fica bloqueado por 10 minutos.
-- Ainda não existe "esqueci minha senha", porque o site não envia SMS nem e-mail. Se um cliente esquecer,
-  apague a chave `user:` seguida do WhatsApp dele (só números, sem o 55) no painel do Upstash; ele
-  cria a conta de novo e o histórico continua lá.
+- **Trocar senha:** logado, o cliente toca em **Trocar senha** em "Meus agendamentos".
+- **Esqueci minha senha:** o cliente pede um código pelo WhatsApp. No painel `/admin`, em
+  "Cliente esqueceu a senha", digite o WhatsApp dele e toque em **Gerar código**. O botão
+  "Enviar pelo WhatsApp" já abre a conversa com a mensagem pronta. O código vale 30 minutos e
+  para de valer depois de 5 tentativas erradas. Trocar a senha desconecta a conta dos outros aparelhos.
+- Antes de mandar o código, confirme que quem está pedindo é mesmo o dono daquele número.
 - O WhatsApp não é verificado no cadastro, por isso o histórico mostra só agendamentos ligados à conta,
   e não tudo o que já foi marcado com aquele número.
 
@@ -40,6 +43,7 @@ em vercel.com/docs/limits/fair-use-guidelines antes de depender disso.
 | `ADMIN_PASSWORD` | Uma senha forte para o painel `/admin`. |
 | `PIX_NAME` | (opcional) Nome no Pix. Padrão: THIAGO BARBEARIA. |
 | `PIX_CITY` | (opcional) Cidade, sem acento. Padrão: SAO PAULO. |
+| `WHATSAPP` | (opcional) WhatsApp da barbearia com DDD. Mostra ao cliente um botão para pedir o código de nova senha. |
 
 6. **Faça um novo deploy** (aba Deployments → ⋯ → Redeploy) para as variáveis valerem.
 7. Abra `seusite.vercel.app` para testar um agendamento e `seusite.vercel.app/admin` para o painel.

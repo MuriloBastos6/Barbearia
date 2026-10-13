@@ -10,6 +10,7 @@ const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_R
 const PIX_NAME = process.env.PIX_NAME || 'THIAGO BARBEARIA';     // nome do recebedor (máx. 25 letras)
 const PIX_CITY = process.env.PIX_CITY || 'SAO PAULO';            // cidade (máx. 15 letras)
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';         // senha do painel /admin
+const WHATSAPP = String(process.env.WHATSAPP || '').replace(/\D/g, ''); // (opcional) WhatsApp da barbearia, para o cliente pedir o código de nova senha
 const DEPOSIT = '20.00';                                         // valor do sinal
 const HOLD_MIN = +process.env.HOLD_MIN || 15;                    // minutos que o horário fica reservado aguardando o Pix
 const HOLD_GRACE_MS = 10000;                                     // folga para o relógio do banco não vencer antes do nosso
@@ -20,6 +21,7 @@ const SLOTS = ['10:00', '11:30', '13:00', '14:30', '16:00', '17:30', '19:00', '2
 const BOOKING_TTL = 60 * 24 * 3600;   // registros somem sozinhos após 60 dias
 const SLOT_TTL = 45 * 24 * 3600;
 const SESSION_TTL = 30 * 24 * 3600;   // cliente fica logado por 30 dias
+const RESET_TTL = 30 * 60;            // código para nova senha vale 30 minutos
 
 // ---------- Chave Pix ----------
 // Ajustada para o formato que os bancos exigem: telefone vira +55DDDNUMERO, e-mail e chave
@@ -88,9 +90,11 @@ async function getUser(phone) {
   const raw = await redis('GET', 'user:' + phone);
   return raw ? JSON.parse(raw) : null;
 }
-async function newSession(phone) {
+// A sessão guarda "telefone:versão da senha". Trocar a senha muda a versão e derruba
+// as sessões abertas em outros aparelhos.
+async function newSession(u) {
   const token = crypto.randomBytes(24).toString('hex');
-  await redis('SET', 'sess:' + token, phone, 'EX', SESSION_TTL);
+  await redis('SET', 'sess:' + token, u.phone + ':' + (u.ver || 0), 'EX', SESSION_TTL);
   return token;
 }
 function bearer(req) {
@@ -100,9 +104,20 @@ function bearer(req) {
 async function currentUser(req) {
   const token = bearer(req);
   if (!token) return null;
-  const phone = await redis('GET', 'sess:' + token);
-  return phone ? getUser(phone) : null;
+  const val = await redis('GET', 'sess:' + token);
+  if (!val) return null;
+  const [phone, ver = '0'] = val.split(':');
+  const u = await getUser(phone);
+  return u && String(u.ver || 0) === ver ? u : null;
 }
+async function setPassword(u, pw) {
+  u.salt = crypto.randomBytes(16).toString('hex');
+  u.hash = await scrypt(pw, u.salt);
+  u.ver = (u.ver || 0) + 1;
+  await redis('SET', 'user:' + u.phone, JSON.stringify(u));
+}
+const badPassword = pw => pw.length < 6 || pw.length > 100;
+const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const publicUser = u => ({ name: u.name, phone: u.phone });
 // Liga ao histórico da conta um agendamento que o cliente fez sem estar logado (ele precisa
 // ter o id, que só fica salvo no aparelho onde agendou, e o WhatsApp precisa ser o mesmo).
@@ -209,7 +224,7 @@ async function route(req, res, p, query, readJson) {
   const method = req.method;
 
   if (method === 'GET' && p === '/config') {
-    return send(res, 200, { name: 'Thiago Barbearia', deposit: DEPOSIT, holdMin: HOLD_MIN, days: openDays(), pixConfigured: !!PIX_KEY });
+    return send(res, 200, { name: 'Thiago Barbearia', deposit: DEPOSIT, holdMin: HOLD_MIN, days: openDays(), pixConfigured: !!PIX_KEY, whatsapp: WHATSAPP });
   }
 
   if (method === 'GET' && p === '/slots') {
@@ -264,7 +279,7 @@ async function route(req, res, p, query, readJson) {
     if (p === '/auth/register') {
       const cleanName = String(name || '').trim().slice(0, 60);
       if (cleanName.length < 2) return send(res, 400, { error: 'Informe seu nome.' });
-      if (pw.length < 6 || pw.length > 100) return send(res, 400, { error: 'A senha precisa ter pelo menos 6 caracteres.' });
+      if (badPassword(pw)) return send(res, 400, { error: 'A senha precisa ter pelo menos 6 caracteres.' });
       const salt = crypto.randomBytes(16).toString('hex');
       user = { phone: digits, name: cleanName, salt, hash: await scrypt(pw, salt), createdAt: Date.now() };
       if ((await redis('SET', 'user:' + digits, JSON.stringify(user), 'NX')) !== 'OK') {
@@ -280,7 +295,41 @@ async function route(req, res, p, query, readJson) {
       }
     }
     await attachBooking(user, bookingId);
-    return send(res, 200, { token: await newSession(digits), user: publicUser(user) });
+    return send(res, 200, { token: await newSession(user), user: publicUser(user) });
+  }
+  // Esqueci a senha: o dono gera o código no painel e manda pelo WhatsApp do cliente.
+  if (method === 'POST' && p === '/auth/reset') {
+    const { phone, code, password } = await readJson();
+    const digits = normPhone(phone);
+    const pw = String(password || '');
+    if (!validPhone(digits)) return send(res, 400, { error: 'Informe um WhatsApp válido com DDD.' });
+    if (badPassword(pw)) return send(res, 400, { error: 'A nova senha precisa ter pelo menos 6 caracteres.' });
+    const saved = await redis('GET', 'reset:' + digits);
+    if (!saved) return send(res, 400, { error: 'Código inválido ou vencido. Peça um novo código.' });
+    const given = sha(digits + ':' + String(code || '').replace(/\D/g, ''));
+    if (given !== saved) {
+      // 5 tentativas erradas e o código deixa de valer.
+      const [n] = await redisPipe([['INCR', 'rfail:' + digits], ['EXPIRE', 'rfail:' + digits, RESET_TTL, 'NX']]);
+      if (n >= 5) await redisPipe([['DEL', 'reset:' + digits], ['DEL', 'rfail:' + digits]]);
+      return send(res, 400, { error: n >= 5 ? 'Código errado muitas vezes. Peça um novo código.' : 'Código incorreto.' });
+    }
+    const user = await getUser(digits);
+    if (!user) return send(res, 400, { error: 'Código inválido ou vencido. Peça um novo código.' });
+    await setPassword(user, pw);
+    await redisPipe([['DEL', 'reset:' + digits], ['DEL', 'rfail:' + digits], ['DEL', 'lfailp:' + digits]]);
+    return send(res, 200, { token: await newSession(user), user: publicUser(user) });
+  }
+  if (method === 'POST' && p === '/auth/password') {
+    const user = await currentUser(req);
+    if (!user) return send(res, 401, { error: 'Entre na sua conta para ver seus agendamentos.' });
+    const { current, password } = await readJson();
+    const pw = String(password || ''), cur = String(current || '');
+    const ok = cur.length <= 100 &&
+      crypto.timingSafeEqual(Buffer.from(await scrypt(cur, user.salt), 'hex'), Buffer.from(user.hash, 'hex'));
+    if (!ok) return send(res, 400, { error: 'Senha atual incorreta.' });
+    if (badPassword(pw)) return send(res, 400, { error: 'A nova senha precisa ter pelo menos 6 caracteres.' });
+    await setPassword(user, pw);
+    return send(res, 200, { token: await newSession(user), user: publicUser(user) });
   }
   if (method === 'POST' && p === '/auth/logout') {
     const token = bearer(req);
@@ -365,6 +414,14 @@ async function route(req, res, p, query, readJson) {
       }
       await saveBooking(b);
       return send(res, 200, { ok: true });
+    }
+    if (method === 'POST' && p === '/admin/reset-code') {
+      const digits = normPhone((await readJson()).phone);
+      const user = validPhone(digits) && await getUser(digits);
+      if (!user) return send(res, 404, { error: 'Nenhuma conta com esse WhatsApp.' });
+      const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      await redisPipe([['SET', 'reset:' + digits, sha(digits + ':' + code), 'EX', RESET_TTL], ['DEL', 'rfail:' + digits]]);
+      return send(res, 200, { code, name: user.name, phone: digits, minutes: RESET_TTL / 60 });
     }
     if (method === 'POST' && (p === '/admin/block' || p === '/admin/unblock')) {
       const { date, time } = await readJson();
