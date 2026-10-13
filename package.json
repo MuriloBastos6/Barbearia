@@ -1,0 +1,7 @@
+{
+  "name": "thiago-barbearia",
+  "version": "2.0.0",
+  "description": "Agendamento online com sinal via Pix - Thiago Barbearia (Vercel + Redis)",
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED"
+}

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Painel · Thiago Barbearia</title>
+<style>
+  :root { --bg:#111; --card:#1b1b1b; --line:#2c2c2c; --gold:#d4a24c; --text:#f2efe9; --muted:#9a958a; --ok:#4cc38a; --bad:#e5604d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:640px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { color:var(--gold); font-size:22px; margin:8px 0 0; }
+  h2 { font-size:16px; margin:0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:16px; }
+  input, select { width:100%; padding:11px; border-radius:10px; border:1px solid var(--line); background:#232323; color:var(--text); font:inherit; }
+  button { font:inherit; cursor:pointer; border-radius:10px; border:1px solid var(--line); background:#2a2a2a; color:var(--text); padding:9px 12px; }
+  button.gold { background:var(--gold); color:#111; border:0; font-weight:700; }
+  button.ok { background:#173a2a; color:var(--ok); border-color:#245a40; }
+  button.bad { background:#3a1d18; color:var(--bad); border-color:#5a2a22; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .grow { flex:1; min-width:120px; }
+  .date { margin:16px 0 6px; color:var(--gold); font-weight:700; font-size:14px; text-transform:capitalize; }
+  .item { border:1px solid var(--line); background:#202020; border-radius:12px; padding:12px; margin-bottom:8px; }
+  .item .top { display:flex; justify-content:space-between; gap:8px; }
+  .time { font-weight:700; font-size:18px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .badge { padding:3px 9px; border-radius:20px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .b-wait { background:#3a3118; color:var(--gold); } .b-ok { background:#173a2a; color:var(--ok); } .b-pend { background:#2a2a2a; color:var(--muted); }
+  .actions { display:flex; gap:8px; margin-top:10px; }
+  .err { color:var(--bad); font-size:14px; min-height:18px; margin-top:8px; }
+  .hide { display:none; }
+  a { color:var(--gold); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>✂ Painel · Thiago Barbearia</h1>
+
+  <div class="card" id="login">
+    <h2>Entrar</h2>
+    <div class="row">
+      <input class="grow" id="pw" type="password" placeholder="Senha do painel" autocomplete="current-password">
+      <button class="gold" id="enter">Entrar</button>
+    </div>
+    <div class="err" id="loginErr"></div>
+  </div>
+
+  <div id="panel" class="hide">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Agendamentos</h2>
+        <button id="reload">Atualizar</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0">Confira o Pix de R$ 20 no seu banco e toque em <b>Confirmar</b>. A tela atualiza sozinha a cada 20 s.</p>
+      <div id="list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Bloquear horário ou dia (folga, feriado, cliente avulso)</h2>
+      <div class="row">
+        <select class="grow" id="bDate"></select>
+        <select class="grow" id="bTime"></select>
+        <button class="gold" id="bAdd">Bloquear</button>
+      </div>
+      <div id="blocks" style="margin-top:12px"></div>
+    </div>
+    <div class="err" id="err"></div>
+    <p class="muted"><a href="#" id="logout">Sair</a></p>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const brDate = d => d.split('-').reverse().join('/');
+const weekName = d => ['domingo','segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado'][new Date(d+'T12:00:00Z').getUTCDay()];
+const phoneFmt = p => p.length >= 11 ? `(${p.slice(-11,-9)}) ${p.slice(-9,-4)}-${p.slice(-4)}` : p;
+let pw = sessionStorage.getItem('tb_admin') || '', timer = null;
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'x-admin-password': pw }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.error || 'Erro.'); e.status = r.status; throw e; }
+  return j;
+}
+
+async function load() {
+  const o = await api('/api/admin/overview');
+  $('login').classList.add('hide'); $('panel').classList.remove('hide');
+  // opções de bloqueio
+  if (!$('bDate').options.length) {
+    o.days.forEach(d => $('bDate').add(new Option(`${weekName(d).slice(0,3)} ${brDate(d)}`, d)));
+    $('bTime').add(new Option('Dia inteiro', ''));
+    o.slots.forEach(s => $('bTime').add(new Option(s, s)));
+  }
+  // agendamentos
+  const L = $('list'); L.innerHTML = '';
+  if (!o.bookings.length) L.innerHTML = '<p class="muted">Nenhum agendamento por enquanto.</p>';
+  let last = '';
+  o.bookings.forEach(b => {
+    if (b.date !== last) { last = b.date; const h = document.createElement('div'); h.className = 'date'; h.textContent = `${weekName(b.date)}, ${brDate(b.date)}`; L.appendChild(h); }
+    const lab = { confirmed:['b-ok','Confirmado'], paid_claimed:['b-wait','Cliente disse que pagou'], pending:['b-pend','Aguardando Pix'] }[b.status];
+    const it = document.createElement('div'); it.className = 'item';
+    const top = document.createElement('div'); top.className = 'top';
+    const left = document.createElement('div');
+    const t = document.createElement('div'); t.className = 'time'; t.textContent = b.time;
+    const n = document.createElement('div'); n.textContent = b.name;
+    const ph = document.createElement('a'); ph.className = 'muted'; ph.textContent = phoneFmt(b.phone);
+    ph.href = 'https://wa.me/' + (b.phone.length <= 11 ? '55' + b.phone : b.phone); ph.target = '_blank'; ph.rel = 'noopener';
+    left.append(t, n, ph);
+    const badge = document.createElement('span'); badge.className = 'badge ' + lab[0]; badge.textContent = lab[1];
+    top.append(left, badge); it.appendChild(top);
+    const act = document.createElement('div'); act.className = 'actions';
+    if (b.status !== 'confirmed') { const c = document.createElement('button'); c.className = 'ok'; c.textContent = '✔ Confirmar'; c.onclick = () => act1(b.id, 'confirm'); act.appendChild(c); }
+    const x = document.createElement('button'); x.className = 'bad'; x.textContent = 'Cancelar'; x.onclick = () => { if (confirm(`Cancelar ${b.name} às ${b.time}?`)) act1(b.id, 'cancel'); };
+    act.appendChild(x); it.appendChild(act); L.appendChild(it);
+  });
+  // bloqueios
+  const B = $('blocks'); B.innerHTML = '';
+  o.blocks.forEach(k => {
+    const r = document.createElement('div'); r.className = 'row item';
+    const s = document.createElement('span'); s.className = 'grow'; s.textContent = `${brDate(k.date)} · ${k.time || 'dia inteiro'}`;
+    const u = document.createElement('button'); u.textContent = 'Liberar'; u.onclick = () => run(() => api('/api/admin/unblock', 'POST', { date: k.date, time: k.time }));
+    r.append(s, u); B.appendChild(r);
+  });
+}
+async function run(fn) { $('err').textContent = ''; try { await fn(); await load(); } catch (e) { $('err').textContent = e.message; } }
+const act1 = (id, what) => run(() => api(`/api/admin/booking/${id}/${what}`, 'POST'));
+
+$('bAdd').onclick = () => run(() => api('/api/admin/block', 'POST', { date: $('bDate').value, time: $('bTime').value || null }));
+$('reload').onclick = () => run(async () => {});
+$('enter').onclick = async () => {
+  pw = $('pw').value; $('loginErr').textContent = '';
+  try { await load(); sessionStorage.setItem('tb_admin', pw); start(); } catch (e) { $('loginErr').textContent = e.message; }
+};
+$('pw').addEventListener('keydown', e => { if (e.key === 'Enter') $('enter').click(); });
+$('logout').onclick = e => { e.preventDefault(); sessionStorage.removeItem('tb_admin'); location.reload(); };
+function start() { clearInterval(timer); timer = setInterval(() => load().catch(() => {}), 20000); }
+if (pw) load().then(start).catch(() => sessionStorage.removeItem('tb_admin'));
+</script>
+</body>
+</html>

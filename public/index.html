@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thiago Barbearia · Agendamento</title>
+<style>
+  :root { --bg:#111; --card:#1b1b1b; --line:#2c2c2c; --gold:#d4a24c; --text:#f2efe9; --muted:#9a958a; --ok:#4cc38a; --bad:#e5604d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:520px; margin:0 auto; padding:20px 16px 60px; }
+  header { text-align:center; padding:18px 0 6px; }
+  header h1 { margin:0; font-size:26px; letter-spacing:.5px; color:var(--gold); }
+  header p { margin:6px 0 0; color:var(--muted); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:16px; }
+  h2 { margin:0 0 12px; font-size:16px; }
+  .days { display:flex; gap:8px; overflow-x:auto; padding-bottom:6px; }
+  .day { flex:0 0 auto; min-width:62px; text-align:center; padding:10px 6px; border-radius:10px; background:#232323; border:1px solid var(--line); color:var(--text); cursor:pointer; font:inherit; }
+  .day small { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; }
+  .day b { font-size:18px; }
+  .day.sel { border-color:var(--gold); background:#2a2417; }
+  .slots { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .slot { padding:12px 0; border-radius:10px; background:#232323; border:1px solid var(--line); color:var(--text); font:inherit; font-weight:600; cursor:pointer; }
+  .slot.sel { border-color:var(--gold); background:var(--gold); color:#111; }
+  .slot:disabled { opacity:.3; cursor:not-allowed; text-decoration:line-through; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input { width:100%; padding:12px; border-radius:10px; border:1px solid var(--line); background:#232323; color:var(--text); font:inherit; }
+  .btn { width:100%; margin-top:14px; padding:14px; border:0; border-radius:12px; background:var(--gold); color:#111; font:inherit; font-weight:700; font-size:16px; cursor:pointer; }
+  .btn.alt { background:#2a2a2a; color:var(--text); border:1px solid var(--line); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .summary { color:var(--muted); font-size:14px; line-height:1.5; }
+  .summary b { color:var(--text); }
+  .err { color:var(--bad); font-size:14px; margin-top:10px; min-height:18px; }
+  .qr { display:flex; justify-content:center; margin:14px 0; }
+  .qr > div { background:#fff; padding:10px; border-radius:10px; }
+  .code { word-break:break-all; font-size:12px; background:#232323; border:1px solid var(--line); border-radius:10px; padding:10px; color:var(--muted); }
+  .timer { text-align:center; font-size:28px; font-weight:700; color:var(--gold); margin:6px 0; }
+  .badge { display:inline-block; padding:4px 10px; border-radius:20px; font-size:13px; font-weight:600; }
+  .b-wait { background:#3a3118; color:var(--gold); } .b-ok { background:#173a2a; color:var(--ok); } .b-bad { background:#3a1d18; color:var(--bad); }
+  .hide { display:none; }
+  .center { text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>✂ Thiago Barbearia</h1>
+    <p>Segunda a sábado · 10h às 22h · Agende seu horário</p>
+  </header>
+
+  <!-- Passo 1: escolher horário -->
+  <div id="stepPick">
+    <div class="card">
+      <h2>1. Escolha o dia</h2>
+      <div class="days" id="days"></div>
+    </div>
+    <div class="card">
+      <h2>2. Escolha o horário <span style="color:var(--muted);font-weight:400">(1h30 cada)</span></h2>
+      <div class="slots" id="slots"><span class="summary">Escolha um dia acima.</span></div>
+    </div>
+    <div class="card hide" id="formCard">
+      <h2>3. Seus dados</h2>
+      <p class="summary" id="chosen"></p>
+      <label for="name">Nome</label>
+      <input id="name" autocomplete="name" maxlength="60" placeholder="Seu nome">
+      <label for="phone">WhatsApp (com DDD)</label>
+      <input id="phone" type="tel" autocomplete="tel" placeholder="(11) 90000-0000">
+      <button class="btn" id="goPay">Continuar para o pagamento do sinal</button>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+
+  <!-- Passo 2: pagamento -->
+  <div id="stepPay" class="hide">
+    <div class="card">
+      <h2>Pague o sinal de R$ <span id="amount">20,00</span> via Pix</h2>
+      <p class="summary" id="paySummary"></p>
+      <div class="timer" id="timer">15:00</div>
+      <p class="summary center">Seu horário está reservado por este tempo.</p>
+      <div class="qr"><div id="qrcode"></div></div>
+      <p class="summary" style="margin-bottom:6px">Ou use o Pix copia e cola:</p>
+      <div class="code" id="payload"></div>
+      <button class="btn alt" id="copy">Copiar código Pix</button>
+      <button class="btn" id="paid">Já fiz o Pix</button>
+      <div class="err" id="payErr"></div>
+    </div>
+  </div>
+
+  <!-- Passo 3: status -->
+  <div id="stepDone" class="hide">
+    <div class="card center">
+      <div id="doneBadge"></div>
+      <h2 id="doneTitle" style="margin-top:14px"></h2>
+      <p class="summary" id="doneText"></p>
+      <button class="btn alt" id="again">Fazer outro agendamento</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const WD = ['dom','seg','ter','qua','qui','sex','sáb'];
+const brDate = d => d.split('-').reverse().join('/');
+const weekName = d => ['domingo','segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado'][new Date(d+'T12:00:00Z').getUTCDay()];
+let cfg, selDate = null, selTime = null, booking = null, tick = null, poll = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Algo deu errado. Tente novamente.');
+  return j;
+}
+function show(step) { for (const s of ['stepPick','stepPay','stepDone']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
+
+async function init() {
+  cfg = await api('/api/config');
+  $('amount').textContent = cfg.deposit.replace('.', ',');
+  const box = $('days');
+  cfg.days.forEach(d => {
+    const b = document.createElement('button');
+    b.className = 'day'; b.dataset.d = d;
+    const dt = new Date(d + 'T12:00:00Z');
+    b.innerHTML = `<small>${WD[dt.getUTCDay()]}</small><b>${d.slice(8)}</b><small>${['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'][+d.slice(5,7)-1]}</small>`;
+    b.onclick = () => pickDay(d);
+    box.appendChild(b);
+  });
+  const saved = localStorage.getItem('tb_booking');
+  if (saved) { try { booking = await api('/api/booking/' + saved); route(); return; } catch (_) { localStorage.removeItem('tb_booking'); } }
+  show('stepPick');
+}
+
+async function pickDay(d) {
+  selDate = d; selTime = null; $('formCard').classList.add('hide');
+  document.querySelectorAll('.day').forEach(x => x.classList.toggle('sel', x.dataset.d === d));
+  $('slots').innerHTML = '<span class="summary">Carregando…</span>';
+  try {
+    const list = await api('/api/slots?date=' + d);
+    $('slots').innerHTML = '';
+    list.forEach(s => {
+      const b = document.createElement('button');
+      b.className = 'slot'; b.textContent = s.time; b.disabled = s.status !== 'free';
+      b.onclick = () => pickTime(s.time, b);
+      $('slots').appendChild(b);
+    });
+  } catch (e) { $('slots').innerHTML = `<span class="err">${e.message}</span>`; }
+}
+function pickTime(t, el) {
+  selTime = t;
+  document.querySelectorAll('.slot').forEach(x => x.classList.remove('sel')); el.classList.add('sel');
+  $('chosen').innerHTML = `<b>${weekName(selDate)}, ${brDate(selDate)}</b> às <b>${t}</b> (até ${endTime(t)})`;
+  $('formCard').classList.remove('hide'); $('err').textContent = '';
+  $('formCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function endTime(t) { const [h,m] = t.split(':').map(Number); const e = h*60+m+90; return String(Math.floor(e/60)).padStart(2,'0') + ':' + String(e%60).padStart(2,'0'); }
+
+$('goPay').onclick = async () => {
+  $('err').textContent = ''; $('goPay').disabled = true;
+  try {
+    booking = await api('/api/book', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: $('name').value, phone: $('phone').value, date: selDate, time: selTime }) });
+    localStorage.setItem('tb_booking', booking.id);
+    route();
+  } catch (e) { $('err').textContent = e.message; if (selDate) pickDay(selDate); }
+  $('goPay').disabled = false;
+};
+
+function route() {
+  clearInterval(tick); clearInterval(poll);
+  const s = booking.status;
+  if (s === 'pending') return showPay();
+  showDone();
+  if (s === 'paid_claimed') poll = setInterval(refresh, 10000);
+}
+async function refresh() {
+  try { booking = await api('/api/booking/' + booking.id); if (booking.status !== 'paid_claimed') { clearInterval(poll); showDone(); } } catch (_) {}
+}
+
+function showPay() {
+  show('stepPay');
+  $('paySummary').innerHTML = `<b>${booking.name}</b> · ${weekName(booking.date)}, <b>${brDate(booking.date)}</b> às <b>${booking.time}</b>`;
+  $('payload').textContent = booking.pix.payload;
+  $('qrcode').innerHTML = '';
+  try { new QRCode($('qrcode'), { text: booking.pix.payload, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.M }); }
+  catch (_) { $('qrcode').parentElement.classList.add('hide'); }
+  const upd = () => {
+    const left = Math.max(0, booking.expiresAt - Date.now());
+    $('timer').textContent = String(Math.floor(left/60000)).padStart(2,'0') + ':' + String(Math.floor(left/1000)%60).padStart(2,'0');
+    if (left <= 0) { clearInterval(tick); booking.status = 'expired'; showDone(); }
+  };
+  upd(); tick = setInterval(upd, 1000);
+}
+$('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(booking.pix.payload); $('copy').textContent = 'Código copiado ✔'; }
+  catch (_) { const r = document.createRange(); r.selectNodeContents($('payload')); getSelection().removeAllRanges(); getSelection().addRange(r); $('copy').textContent = 'Selecionado, copie o código'; }
+};
+$('paid').onclick = async () => {
+  $('payErr').textContent = ''; $('paid').disabled = true;
+  try { booking = await api('/api/booking/' + booking.id + '/paid', { method:'POST' }); route(); }
+  catch (e) { $('payErr').textContent = e.message; $('paid').disabled = false; }
+};
+
+function showDone() {
+  clearInterval(tick);
+  show('stepDone');
+  const when = `${weekName(booking.date)}, ${brDate(booking.date)} às ${booking.time}`;
+  const map = {
+    paid_claimed: ['b-wait','Aguardando confirmação','⏳ Pagamento em análise', `Recebemos o aviso do seu Pix para ${when}. Assim que o Thiago conferir, seu horário será confirmado. Esta tela atualiza sozinha.`],
+    confirmed: ['b-ok','Horário confirmado','✅ Tudo certo, '+booking.name+'!', `Te esperamos ${when}. Se precisar remarcar, chame no WhatsApp com antecedência.`],
+    expired: ['b-bad','Reserva expirada','Tempo esgotado', 'O pagamento não foi feito a tempo e o horário foi liberado. Faça um novo agendamento.'],
+    cancelled: ['b-bad','Cancelado','Agendamento cancelado', 'Este horário foi cancelado. Você pode fazer um novo agendamento.']
+  };
+  const [cls, badge, title, text] = map[booking.status] || map.expired;
+  $('doneBadge').innerHTML = `<span class="badge ${cls}">${badge}</span>`;
+  $('doneTitle').textContent = title; $('doneText').textContent = text;
+  $('again').classList.toggle('hide', booking.status === 'paid_claimed');
+  if (['expired','cancelled'].includes(booking.status)) localStorage.removeItem('tb_booking');
+}
+$('again').onclick = () => { localStorage.removeItem('tb_booking'); clearInterval(poll); booking = null; selTime = null; show('stepPick'); if (selDate) pickDay(selDate); };
+
+init().catch(e => { document.body.insertAdjacentHTML('beforeend', `<p class="err center">${e.message}</p>`); });
+</script>
+</body>
+</html>
