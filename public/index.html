@@ -39,10 +39,22 @@
   .b-wait { background:#3a3118; color:var(--gold); } .b-ok { background:#173a2a; color:var(--ok); } .b-bad { background:#3a1d18; color:var(--bad); }
   .hide { display:none; }
   .center { text-align:center; }
+  .topbar { display:flex; justify-content:flex-end; gap:8px; }
+  .link { background:none; border:1px solid var(--line); color:var(--gold); font:inherit; font-size:14px; padding:7px 12px; border-radius:20px; cursor:pointer; }
+  .tabs { display:flex; gap:8px; margin-bottom:6px; }
+  .tabs button { flex:1; padding:10px; border-radius:10px; border:1px solid var(--line); background:#232323; color:var(--muted); font:inherit; cursor:pointer; }
+  .tabs button.sel { border-color:var(--gold); color:var(--text); background:#2a2417; }
+  .hist { border:1px solid var(--line); background:#202020; border-radius:12px; padding:12px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .hist.click { cursor:pointer; border-color:var(--gold); }
+  .hist .when { font-weight:600; }
+  .hist .when small { display:block; color:var(--muted); font-weight:400; font-size:13px; margin-top:2px; }
+  .sub { color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.5px; margin:18px 0 8px; }
+  .b-muted { background:#2a2a2a; color:var(--muted); }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="topbar"><button class="link" id="accountBtn">Entrar</button></div>
   <header>
     <h1>✂ Thiago Barbearia</h1>
     <p>Segunda a sábado · 10h às 22h · Agende seu horário</p>
@@ -65,8 +77,38 @@
       <input id="name" autocomplete="name" maxlength="60" placeholder="Seu nome">
       <label for="phone">WhatsApp (com DDD)</label>
       <input id="phone" type="tel" autocomplete="tel" placeholder="(11) 90000-0000">
+      <p class="summary hide" id="loggedHint" style="margin:6px 0 0;font-size:13px">O agendamento fica salvo no histórico da sua conta.</p>
       <button class="btn" id="goPay">Continuar para o pagamento do sinal</button>
       <div class="err" id="err"></div>
+    </div>
+  </div>
+
+  <!-- Entrar / criar conta -->
+  <div id="stepLogin" class="hide">
+    <div class="card">
+      <div class="tabs"><button id="tabLogin" class="sel">Entrar</button><button id="tabReg">Criar conta</button></div>
+      <p class="summary">Com uma conta você vê o histórico dos seus agendamentos.</p>
+      <div id="regName" class="hide">
+        <label for="aName">Nome</label>
+        <input id="aName" autocomplete="name" maxlength="60" placeholder="Seu nome">
+      </div>
+      <label for="aPhone">WhatsApp (com DDD)</label>
+      <input id="aPhone" type="tel" autocomplete="tel" placeholder="(11) 90000-0000">
+      <label for="aPass">Senha</label>
+      <input id="aPass" type="password" autocomplete="current-password" maxlength="100" placeholder="Mínimo 6 caracteres">
+      <button class="btn" id="authGo">Entrar</button>
+      <button class="btn alt" id="authBack">Voltar</button>
+      <div class="err" id="authErr"></div>
+    </div>
+  </div>
+
+  <!-- Minha conta / histórico -->
+  <div id="stepHistory" class="hide">
+    <div class="card">
+      <h2 id="histHello">Meus agendamentos</h2>
+      <div id="histList"><span class="summary">Carregando…</span></div>
+      <button class="btn" id="histNew">Fazer novo agendamento</button>
+      <button class="btn alt" id="logout">Sair da conta</button>
     </div>
   </div>
 
@@ -104,14 +146,17 @@ const WD = ['dom','seg','ter','qua','qui','sex','sáb'];
 const brDate = d => d.split('-').reverse().join('/');
 const weekName = d => ['domingo','segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado'][new Date(d+'T12:00:00Z').getUTCDay()];
 let cfg, selDate = null, selTime = null, booking = null, tick = null, poll = null;
+let token = null, user = null, regMode = false;
+try { token = localStorage.getItem('tb_token'); } catch (_) {}
 
-async function api(path, opts) {
+async function api(path, opts = {}) {
+  if (token) opts.headers = { ...(opts.headers || {}), Authorization: 'Bearer ' + token };
   const r = await fetch(path, opts);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || 'Algo deu errado. Tente novamente.');
   return j;
 }
-function show(step) { for (const s of ['stepPick','stepPay','stepDone']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
+function show(step) { for (const s of ['stepPick','stepPay','stepDone','stepLogin','stepHistory']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
 
 async function init() {
   cfg = await api('/api/config');
@@ -125,6 +170,10 @@ async function init() {
     b.onclick = () => pickDay(d);
     box.appendChild(b);
   });
+  if (token) {
+    try { user = (await api('/api/me')).user; } catch (_) { setToken(null); }
+  }
+  applyUser();
   const saved = localStorage.getItem('tb_booking');
   if (saved) { try { booking = await api('/api/booking/' + saved); route(); return; } catch (_) { localStorage.removeItem('tb_booking'); } }
   show('stepPick');
@@ -216,7 +265,103 @@ function showDone() {
   $('again').classList.toggle('hide', booking.status === 'paid_claimed');
   if (['expired','cancelled'].includes(booking.status)) localStorage.removeItem('tb_booking');
 }
-$('again').onclick = () => { localStorage.removeItem('tb_booking'); clearInterval(poll); booking = null; selTime = null; show('stepPick'); if (selDate) pickDay(selDate); };
+// ---------- Conta ----------
+function setToken(t) {
+  token = t;
+  try { t ? localStorage.setItem('tb_token', t) : localStorage.removeItem('tb_token'); } catch (_) {}
+  if (!t) user = null;
+}
+function applyUser() {
+  $('accountBtn').textContent = user ? 'Meus agendamentos' : 'Entrar';
+  $('loggedHint').classList.toggle('hide', !user);
+  $('phone').readOnly = !!user;
+  if (user) { $('name').value = $('name').value || user.name; $('phone').value = phoneFmt(user.phone); }
+}
+const phoneFmt = p => p.length === 11 ? `(${p.slice(0,2)}) ${p.slice(2,7)}-${p.slice(7)}` : p.length === 10 ? `(${p.slice(0,2)}) ${p.slice(2,6)}-${p.slice(6)}` : p;
+function setMode(reg) {
+  regMode = reg;
+  $('tabLogin').classList.toggle('sel', !reg); $('tabReg').classList.toggle('sel', reg);
+  $('regName').classList.toggle('hide', !reg);
+  $('aPass').autocomplete = reg ? 'new-password' : 'current-password';
+  $('authGo').textContent = reg ? 'Criar conta' : 'Entrar';
+  $('authErr').textContent = '';
+}
+$('tabLogin').onclick = () => setMode(false);
+$('tabReg').onclick = () => setMode(true);
+$('accountBtn').onclick = () => {
+  clearInterval(tick); clearInterval(poll);
+  if (user) return openHistory();
+  if (!$('aPhone').value && $('phone').value) $('aPhone').value = $('phone').value;
+  if (!$('aName').value && $('name').value) $('aName').value = $('name').value;
+  setMode(false); show('stepLogin');
+};
+$('authBack').onclick = backToStart;
+$('authGo').onclick = async () => {
+  $('authErr').textContent = ''; $('authGo').disabled = true;
+  try {
+    let bookingId = null; try { bookingId = localStorage.getItem('tb_booking'); } catch (_) {}
+    const r = await api(regMode ? '/api/auth/register' : '/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: $('aName').value, phone: $('aPhone').value, password: $('aPass').value, bookingId }) });
+    setToken(r.token); user = r.user; $('aPass').value = '';
+    applyUser(); openHistory();
+  } catch (e) { $('authErr').textContent = e.message; }
+  $('authGo').disabled = false;
+};
+$('logout').onclick = async () => {
+  try { await api('/api/auth/logout', { method:'POST' }); } catch (_) {}
+  setToken(null); $('name').value = ''; $('phone').value = ''; applyUser(); backToStart();
+};
+$('histNew').onclick = () => { try { localStorage.removeItem('tb_booking'); } catch (_) {} booking = null; backToStart(); };
+
+const HIST = {
+  pending: ['b-wait','Aguardando Pix'], paid_claimed: ['b-wait','Em análise'], confirmed: ['b-ok','Confirmado'],
+  done: ['b-muted','Realizado'], expired: ['b-bad','Expirado'], cancelled: ['b-bad','Cancelado']
+};
+async function openHistory() {
+  show('stepHistory');
+  $('histHello').textContent = `Olá, ${user.name.split(' ')[0]}! Seus agendamentos`;
+  $('histList').innerHTML = '<span class="summary">Carregando…</span>';
+  try {
+    const r = await api('/api/me');
+    user = r.user;
+    const today = new Date().toLocaleString('sv-SE', { timeZone: 'America/Sao_Paulo' }).slice(0, 10);
+    const next = r.bookings.filter(b => b.date >= today && !['expired','cancelled'].includes(b.status)).reverse();
+    const past = r.bookings.filter(b => !next.includes(b));
+    $('histList').innerHTML = '';
+    if (!r.bookings.length) { $('histList').innerHTML = '<p class="summary">Você ainda não tem agendamentos nesta conta.</p>'; return; }
+    for (const [title, list] of [['Próximos', next], ['Anteriores', past]]) {
+      if (!list.length) continue;
+      const h = document.createElement('div'); h.className = 'sub'; h.textContent = title; $('histList').appendChild(h);
+      list.forEach(b => {
+        const st = (b.status === 'confirmed' && b.date < today) ? 'done' : b.status;
+        const [cls, label] = HIST[st] || HIST.expired;
+        const el = document.createElement('div');
+        el.className = 'hist' + (['pending','paid_claimed'].includes(b.status) ? ' click' : '');
+        const w = document.createElement('div'); w.className = 'when';
+        w.textContent = `${brDate(b.date)} às ${b.time}`;
+        const sm = document.createElement('small'); sm.textContent = weekName(b.date); w.appendChild(sm);
+        const bd = document.createElement('span'); bd.className = 'badge ' + cls; bd.textContent = label;
+        el.append(w, bd);
+        if (el.classList.contains('click')) el.onclick = async () => {
+          try { booking = await api('/api/booking/' + b.id); localStorage.setItem('tb_booking', booking.id); route(); } catch (e) { alert(e.message); }
+        };
+        $('histList').appendChild(el);
+      });
+    }
+  } catch (e) {
+    if (/Entre na sua conta/.test(e.message)) { setToken(null); applyUser(); setMode(false); return show('stepLogin'); }
+    $('histList').innerHTML = `<span class="err">${e.message}</span>`;
+  }
+}
+function backToStart() {
+  clearInterval(tick); clearInterval(poll);
+  let saved = null; try { saved = localStorage.getItem('tb_booking'); } catch (_) {}
+  if (saved && booking && booking.id === saved) return route();
+  booking = null; selTime = null; $('formCard').classList.add('hide');
+  show('stepPick'); if (selDate) pickDay(selDate);
+}
+
+$('again').onclick = () => { localStorage.removeItem('tb_booking'); clearInterval(poll); booking = null; selTime = null; applyUser(); show('stepPick'); if (selDate) pickDay(selDate); };
 
 init().catch(e => { document.body.insertAdjacentHTML('beforeend', `<p class="err center">${e.message}</p>`); });
 </script>

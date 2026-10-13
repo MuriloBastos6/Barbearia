@@ -19,6 +19,7 @@ const TZ = 'America/Sao_Paulo';
 const SLOTS = ['10:00', '11:30', '13:00', '14:30', '16:00', '17:30', '19:00', '20:30'];
 const BOOKING_TTL = 60 * 24 * 3600;   // registros somem sozinhos após 60 dias
 const SLOT_TTL = 45 * 24 * 3600;
+const SESSION_TTL = 30 * 24 * 3600;   // cliente fica logado por 30 dias
 
 // ---------- Chave Pix ----------
 // Ajustada para o formato que os bancos exigem: telefone vira +55DDDNUMERO, e-mail e chave
@@ -73,6 +74,43 @@ async function getBooking(id) {
   return raw ? JSON.parse(raw) : null;
 }
 const saveBooking = b => redis('SET', 'b:' + b.id, JSON.stringify(b), 'EX', BOOKING_TTL);
+
+// ---------- Contas de clientes ----------
+// Conta = WhatsApp + senha. A senha é guardada só como hash (scrypt com sal).
+const scrypt = (pw, salt) => new Promise((ok, fail) => crypto.scrypt(pw, salt, 32, (e, k) => e ? fail(e) : ok(k.toString('hex'))));
+function normPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if ((d.length === 12 || d.length === 13) && d.startsWith('55')) d = d.slice(2);
+  return d;
+}
+const validPhone = d => d.length === 10 || d.length === 11;
+async function getUser(phone) {
+  const raw = await redis('GET', 'user:' + phone);
+  return raw ? JSON.parse(raw) : null;
+}
+async function newSession(phone) {
+  const token = crypto.randomBytes(24).toString('hex');
+  await redis('SET', 'sess:' + token, phone, 'EX', SESSION_TTL);
+  return token;
+}
+function bearer(req) {
+  const m = String(req.headers.authorization || '').match(/^Bearer ([a-f0-9]{48})$/);
+  return m ? m[1] : null;
+}
+async function currentUser(req) {
+  const token = bearer(req);
+  if (!token) return null;
+  const phone = await redis('GET', 'sess:' + token);
+  return phone ? getUser(phone) : null;
+}
+const publicUser = u => ({ name: u.name, phone: u.phone });
+// Liga ao histórico da conta um agendamento que o cliente fez sem estar logado (ele precisa
+// ter o id, que só fica salvo no aparelho onde agendou, e o WhatsApp precisa ser o mesmo).
+async function attachBooking(u, id) {
+  if (typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)) return;
+  const b = await getBooking(id);
+  if (b && normPhone(b.phone) === u.phone) await redis('SADD', 'ubk:' + u.phone, b.id);
+}
 
 // ---------- Datas (sempre no horário de São Paulo) ----------
 function nowSP() {
@@ -183,10 +221,12 @@ async function route(req, res, p, query, readJson) {
   if (method === 'POST' && p === '/book') {
     if (!PIX_KEY) return send(res, 503, { error: 'Pagamento ainda não configurado.' });
     const { name, phone, date, time } = await readJson();
+    const user = await currentUser(req);
     const cleanName = String(name || '').trim().slice(0, 60);
-    const digits = String(phone || '').replace(/\D/g, '');
+    // Logado, o agendamento vai sempre para o WhatsApp da conta.
+    const digits = user ? user.phone : normPhone(phone);
     if (cleanName.length < 2) return send(res, 400, { error: 'Informe seu nome.' });
-    if (digits.length < 10 || digits.length > 13) return send(res, 400, { error: 'Informe um WhatsApp válido com DDD.' });
+    if (!validPhone(digits)) return send(res, 400, { error: 'Informe um WhatsApp válido com DDD.' });
     if (!validDate(date) || !SLOTS.includes(time) || !openDays().includes(date)) return send(res, 400, { error: 'Horário inválido.' });
     const current = (await dayStatus(date)).find(s => s.time === time);
     if (current.status !== 'free') return send(res, 409, { error: 'Esse horário acabou de ser ocupado. Escolha outro.' });
@@ -204,8 +244,64 @@ async function route(req, res, p, query, readJson) {
       await releaseSlot(b);
       return send(res, 429, { error: 'Você já tem reservas aguardando pagamento. Conclua ou aguarde expirar.' });
     }
-    await redisPipe([['SET', 'b:' + b.id, JSON.stringify(b), 'EX', BOOKING_TTL], ['SADD', 'ids', b.id]]);
+    const cmds = [['SET', 'b:' + b.id, JSON.stringify(b), 'EX', BOOKING_TTL], ['SADD', 'ids', b.id]];
+    if (user) cmds.push(['SADD', 'ubk:' + user.phone, b.id]);
+    await redisPipe(cmds);
     return send(res, 201, publicBooking(b));
+  }
+
+  // ----- Conta do cliente -----
+  if (method === 'POST' && (p === '/auth/register' || p === '/auth/login')) {
+    const { name, phone, password, bookingId } = await readJson();
+    const digits = normPhone(phone);
+    const pw = String(password || '');
+    if (!validPhone(digits)) return send(res, 400, { error: 'Informe um WhatsApp válido com DDD.' });
+    const ip = clientIp(req);
+    const [ipFails, phFails] = (await redisPipe([['GET', 'lfail:' + ip], ['GET', 'lfailp:' + digits]])).map(x => +x || 0);
+    if (ipFails >= 10 || phFails >= 10) return send(res, 429, { error: 'Muitas tentativas. Aguarde alguns minutos.' });
+
+    let user;
+    if (p === '/auth/register') {
+      const cleanName = String(name || '').trim().slice(0, 60);
+      if (cleanName.length < 2) return send(res, 400, { error: 'Informe seu nome.' });
+      if (pw.length < 6 || pw.length > 100) return send(res, 400, { error: 'A senha precisa ter pelo menos 6 caracteres.' });
+      const salt = crypto.randomBytes(16).toString('hex');
+      user = { phone: digits, name: cleanName, salt, hash: await scrypt(pw, salt), createdAt: Date.now() };
+      if ((await redis('SET', 'user:' + digits, JSON.stringify(user), 'NX')) !== 'OK') {
+        return send(res, 409, { error: 'Já existe uma conta com esse WhatsApp. Entre com sua senha.' });
+      }
+    } else {
+      user = await getUser(digits);
+      const ok = user && pw.length <= 100 &&
+        crypto.timingSafeEqual(Buffer.from(await scrypt(pw, user.salt), 'hex'), Buffer.from(user.hash, 'hex'));
+      if (!ok) {
+        await redisPipe([['INCR', 'lfail:' + ip], ['EXPIRE', 'lfail:' + ip, 600, 'NX'], ['INCR', 'lfailp:' + digits], ['EXPIRE', 'lfailp:' + digits, 600, 'NX']]);
+        return send(res, 401, { error: 'WhatsApp ou senha incorretos.' });
+      }
+    }
+    await attachBooking(user, bookingId);
+    return send(res, 200, { token: await newSession(digits), user: publicUser(user) });
+  }
+  if (method === 'POST' && p === '/auth/logout') {
+    const token = bearer(req);
+    if (token) await redis('DEL', 'sess:' + token);
+    return send(res, 200, { ok: true });
+  }
+  if (method === 'GET' && p === '/me') {
+    const user = await currentUser(req);
+    if (!user) return send(res, 401, { error: 'Entre na sua conta para ver seus agendamentos.' });
+    const ids = await redis('SMEMBERS', 'ubk:' + user.phone);
+    const bookings = [];
+    if (ids.length) {
+      const vals = await redis('MGET', ...ids.map(i => 'b:' + i));
+      const stale = [];
+      vals.forEach((v, i) => { if (v) bookings.push(JSON.parse(v)); else stale.push(ids[i]); });
+      if (stale.length) await redis('SREM', 'ubk:' + user.phone, ...stale);
+    }
+    const history = bookings
+      .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time))
+      .map(b => { const pb = publicBooking(b); return { id: pb.id, name: pb.name, date: pb.date, time: pb.time, status: pb.status }; });
+    return send(res, 200, { user: publicUser(user), bookings: history });
   }
 
   let m;
