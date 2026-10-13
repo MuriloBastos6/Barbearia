@@ -5,6 +5,19 @@
 - O horário fica reservado por 15 minutos enquanto ele paga. Se não pagar, volta a ficar livre.
 - Você confere o Pix no seu banco e toca em **Confirmar** no painel (`seusite.vercel.app/admin`).
 - O Pix cai direto na sua chave, sem intermediário e sem taxa.
+- O cliente pode criar uma conta (WhatsApp + senha) no botão **Entrar** e ver o histórico dos agendamentos dele.
+
+## Conta do cliente
+
+- Agendamentos feitos com a conta logada entram no histórico dela. Um agendamento feito sem login
+  também entra, se o cliente criar a conta ou entrar **no mesmo aparelho** logo depois de agendar.
+- A senha é guardada só como hash (scrypt), nunca em texto. Depois de 10 senhas erradas, o login
+  daquele WhatsApp fica bloqueado por 10 minutos.
+- Ainda não existe "esqueci minha senha", porque o site não envia SMS nem e-mail. Se um cliente esquecer,
+  apague a chave `user:` seguida do WhatsApp dele (só números, sem o 55) no painel do Upstash; ele
+  cria a conta de novo e o histórico continua lá.
+- O WhatsApp não é verificado no cadastro, por isso o histórico mostra só agendamentos ligados à conta,
+  e não tudo o que já foi marcado com aquele número.
 
 ## Aviso importante sobre o plano gratuito
 
@@ -45,5 +58,5 @@ O sistema já ajusta telefone para `+55DDDNUMERO`, e-mail em minúsculas e CPF/C
 
 - A confirmação do Pix é manual: o sistema não consegue saber se o dinheiro caiu. Sempre confira no banco antes de confirmar.
 - Um cliente mal-intencionado pode tocar em "Já fiz o Pix" sem pagar. O horário só vira "confirmado" quando você confirma. Horários nesse estado aparecem como "Cliente disse que pagou" e ficam ocupados até você confirmar ou cancelar.
-- Os registros somem sozinhos do banco depois de 60 dias.
+- Os registros somem sozinhos do banco depois de 60 dias, e por isso o histórico do cliente mostra só os últimos 60 dias.
 - Para confirmação automática no futuro, dá para integrar um provedor (Mercado Pago, Asaas etc.) sem refazer o site.
