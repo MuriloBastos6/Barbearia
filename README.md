@@ -1,6 +1,6 @@
 # Thiago Barbearia · Agendamento com sinal (versão Vercel)
 
-- Segunda a sábado, horários de 1h30: 10:00, 11:30, 13:00, 14:30, 16:00, 17:30, 19:00 e 20:30 (o último termina às 22:00).
+- Segunda a sábado, horários de 1 hora, das 10:00 às 19:00 (o último termina às 20:00). Para mudar, edite `SLOTS` em `api/index.js`.
 - O cliente escolhe o horário e paga R$ 20,00 de sinal. O horário fica reservado por 15 minutos
   enquanto ele paga. Se não pagar, volta a ficar livre.
 - Há duas formas de receber o sinal:

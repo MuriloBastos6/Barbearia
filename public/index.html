@@ -19,7 +19,7 @@
   .day small { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; }
   .day b { font-size:18px; }
   .day.sel { border-color:var(--gold); background:#2a2417; }
-  .slots { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .slots { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
   .slot { padding:12px 0; border-radius:10px; background:#232323; border:1px solid var(--line); color:var(--text); font:inherit; font-weight:600; cursor:pointer; }
   .slot.sel { border-color:var(--gold); background:var(--gold); color:#111; }
   .slot:disabled { opacity:.3; cursor:not-allowed; text-decoration:line-through; }
@@ -57,7 +57,7 @@
   <div class="topbar"><button class="link" id="accountBtn">Entrar</button></div>
   <header>
     <h1>✂ Thiago Barbearia</h1>
-    <p>Segunda a sábado · 10h às 22h · Agende seu horário</p>
+    <p>Segunda a sábado · 10h às 20h · Agende seu horário</p>
   </header>
 
   <!-- Passo 1: escolher horário -->
@@ -67,7 +67,7 @@
       <div class="days" id="days"></div>
     </div>
     <div class="card">
-      <h2>2. Escolha o horário <span style="color:var(--muted);font-weight:400">(1h30 cada)</span></h2>
+      <h2>2. Escolha o horário <span style="color:var(--muted);font-weight:400">(1 hora cada)</span></h2>
       <div class="slots" id="slots"><span class="summary">Escolha um dia acima.</span></div>
     </div>
     <div class="card hide" id="formCard">
@@ -253,7 +253,7 @@ function pickTime(t, el) {
   $('formCard').classList.remove('hide'); $('err').textContent = '';
   $('formCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
-function endTime(t) { const [h,m] = t.split(':').map(Number); const e = h*60+m+90; return String(Math.floor(e/60)).padStart(2,'0') + ':' + String(e%60).padStart(2,'0'); }
+function endTime(t) { const [h,m] = t.split(':').map(Number); const e = h*60+m+60; return String(Math.floor(e/60)).padStart(2,'0') + ':' + String(e%60).padStart(2,'0'); }
 
 $('goPay').onclick = async () => {
   $('err').textContent = ''; $('goPay').disabled = true;
