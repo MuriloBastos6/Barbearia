@@ -20,8 +20,13 @@ const HOLD_MIN = +process.env.HOLD_MIN || 15;                    // minutos que 
 const HOLD_GRACE_MS = 10000;                                     // folga para o relógio do banco não vencer antes do nosso
 const MAX_DAYS_AHEAD = 21;
 const TZ = 'America/Sao_Paulo';
-// Segunda a sábado, blocos de 1h30, do primeiro às 10:00 até o último às 20:30 (termina 22:00)
-const SLOTS = ['10:00', '11:30', '13:00', '14:30', '16:00', '17:30', '19:00', '20:30'];
+// Segunda a sábado, blocos de 1 hora, do primeiro às 10:00 até o último às 19:00 (termina 20:00)
+const SLOTS = ['10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00'];
+const SLOT_MIN = 60;
+// Horários da grade antiga (1h30). Agendamentos já feitos nela continuam ocupando o horário novo
+// que se sobrepõe a eles. Pode apagar isto depois de 45 dias, quando essas reservas já tiverem passado.
+const OLD_SLOTS = ['11:30', '14:30', '17:30', '20:30'], OLD_MIN = 90;
+const toMin = t => +t.slice(0, 2) * 60 + +t.slice(3);
 const BOOKING_TTL = 60 * 24 * 3600;   // registros somem sozinhos após 60 dias
 const SLOT_TTL = 45 * 24 * 3600;
 const SESSION_TTL = 30 * 24 * 3600;   // cliente fica logado por 30 dias
@@ -163,11 +168,20 @@ function isPast(date, time) {
   return date < now.date || (date === now.date && time <= now.time);
 }
 async function dayStatus(date) {
-  const [taken, blocks] = await redisPipe([['MGET', ...SLOTS.map(t => slotKey(date, t))], ['SMEMBERS', 'blocks']]);
+  const [taken, blocks, old] = await redisPipe([
+    ['MGET', ...SLOTS.map(t => slotKey(date, t))], ['SMEMBERS', 'blocks'], ['MGET', ...OLD_SLOTS.map(t => slotKey(date, t))]
+  ]);
   const wholeDay = blocks.includes(date + '|');
+  // 10:00, 13:00, 16:00 e 19:00 existem nas duas grades: uma reserva antiga às 10:00 (até 11:30)
+  // usa a chave das 10:00 e ainda precisa ocupar as 11:00. Reservas novas guardam "dur: 60".
+  const shared = ['10:00', '13:00', '16:00', '19:00'].filter(t => taken[SLOTS.indexOf(t)]);
+  const sharedBk = shared.length ? await redis('MGET', ...shared.map(t => 'b:' + taken[SLOTS.indexOf(t)])) : [];
+  const oldTaken = OLD_SLOTS.filter((t, i) => old[i])
+    .concat(shared.filter((t, i) => sharedBk[i] && !JSON.parse(sharedBk[i]).dur));
+  const overlapsOld = t => oldTaken.some(o => toMin(o) < toMin(t) + SLOT_MIN && toMin(t) < toMin(o) + OLD_MIN);
   return SLOTS.map((time, i) => ({
     time,
-    status: isPast(date, time) ? 'past' : (wholeDay || blocks.includes(`${date}|${time}`)) ? 'blocked' : taken[i] ? 'taken' : 'free'
+    status: isPast(date, time) ? 'past' : (wholeDay || blocks.includes(`${date}|${time}`)) ? 'blocked' : (taken[i] || overlapsOld(time)) ? 'taken' : 'free'
   }));
 }
 
@@ -342,7 +356,7 @@ async function route(req, res, p, query, readJson) {
 
     const b = {
       id: crypto.randomBytes(16).toString('hex'), name: cleanName, phone: digits, date, time,
-      status: 'pending', createdAt: Date.now(), expiresAt: Date.now() + HOLD_MIN * 60 * 1000
+      status: 'pending', createdAt: Date.now(), expiresAt: Date.now() + HOLD_MIN * 60 * 1000, dur: SLOT_MIN
     };
     // Reserva atômica: só um cliente consegue criar a chave do horário.
     const got = await redis('SET', slotKey(date, time), b.id, 'NX', 'PX', Math.round(HOLD_MIN * 60000 + HOLD_GRACE_MS));
