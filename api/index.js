@@ -10,6 +10,11 @@ const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_R
 const PIX_NAME = process.env.PIX_NAME || 'THIAGO BARBEARIA';     // nome do recebedor (máx. 25 letras)
 const PIX_CITY = process.env.PIX_CITY || 'SAO PAULO';            // cidade (máx. 15 letras)
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';         // senha do painel /admin
+const WHATSAPP = String(process.env.WHATSAPP || '').replace(/\D/g, ''); // (opcional) WhatsApp da barbearia, para o cliente pedir o código de nova senha
+// Mercado Pago (opcional): com o Access Token, o cliente paga por Pix, crédito ou débito no
+// checkout do Mercado Pago e o horário se confirma sozinho. Sem ele, vale o Pix manual.
+const MP_TOKEN = process.env.MP_ACCESS_TOKEN || '';
+const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');   // (opcional) endereço do site; sem ele, usa o da requisição
 const DEPOSIT = '20.00';                                         // valor do sinal
 const HOLD_MIN = +process.env.HOLD_MIN || 15;                    // minutos que o horário fica reservado aguardando o Pix
 const HOLD_GRACE_MS = 10000;                                     // folga para o relógio do banco não vencer antes do nosso
@@ -20,6 +25,7 @@ const SLOTS = ['10:00', '11:30', '13:00', '14:30', '16:00', '17:30', '19:00', '2
 const BOOKING_TTL = 60 * 24 * 3600;   // registros somem sozinhos após 60 dias
 const SLOT_TTL = 45 * 24 * 3600;
 const SESSION_TTL = 30 * 24 * 3600;   // cliente fica logado por 30 dias
+const RESET_TTL = 30 * 60;            // código para nova senha vale 30 minutos
 
 // ---------- Chave Pix ----------
 // Ajustada para o formato que os bancos exigem: telefone vira +55DDDNUMERO, e-mail e chave
@@ -66,6 +72,11 @@ const redis = async (...cmd) => (await redisPipe([cmd]))[0];
 const LUA_CLAIM = "if redis.call('GET',KEYS[1])==ARGV[1] then redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]) return 1 else return 0 end";
 const LUA_RELEASE = "if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) else return 0 end";
 const slotKey = (date, time) => `slot:${date}:${time}`;
+// Pagamento aprovado pelo Mercado Pago: fica com o horário se ainda for deste agendamento ou se
+// tiver vagado (o Pix pode ser pago depois de a reserva vencer).
+const LUA_TAKE = "local v=redis.call('GET',KEYS[1]) if v==ARGV[1] or not v then redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]) return 1 else return 0 end";
+const LUA_HOLD = "if redis.call('GET',KEYS[1])==ARGV[1] then redis.call('SET',KEYS[1],ARGV[1],'PX',ARGV[2]) return 1 else return 0 end";
+const takeSlot = async b => (await redis('EVAL', LUA_TAKE, 1, slotKey(b.date, b.time), b.id, SLOT_TTL)) === 1;
 const claimSlot = async b => (await redis('EVAL', LUA_CLAIM, 1, slotKey(b.date, b.time), b.id, SLOT_TTL)) === 1;
 const releaseSlot = b => redis('EVAL', LUA_RELEASE, 1, slotKey(b.date, b.time), b.id);
 
@@ -88,9 +99,11 @@ async function getUser(phone) {
   const raw = await redis('GET', 'user:' + phone);
   return raw ? JSON.parse(raw) : null;
 }
-async function newSession(phone) {
+// A sessão guarda "telefone:versão da senha". Trocar a senha muda a versão e derruba
+// as sessões abertas em outros aparelhos.
+async function newSession(u) {
   const token = crypto.randomBytes(24).toString('hex');
-  await redis('SET', 'sess:' + token, phone, 'EX', SESSION_TTL);
+  await redis('SET', 'sess:' + token, u.phone + ':' + (u.ver || 0), 'EX', SESSION_TTL);
   return token;
 }
 function bearer(req) {
@@ -100,9 +113,20 @@ function bearer(req) {
 async function currentUser(req) {
   const token = bearer(req);
   if (!token) return null;
-  const phone = await redis('GET', 'sess:' + token);
-  return phone ? getUser(phone) : null;
+  const val = await redis('GET', 'sess:' + token);
+  if (!val) return null;
+  const [phone, ver = '0'] = val.split(':');
+  const u = await getUser(phone);
+  return u && String(u.ver || 0) === ver ? u : null;
 }
+async function setPassword(u, pw) {
+  u.salt = crypto.randomBytes(16).toString('hex');
+  u.hash = await scrypt(pw, u.salt);
+  u.ver = (u.ver || 0) + 1;
+  await redis('SET', 'user:' + u.phone, JSON.stringify(u));
+}
+const badPassword = pw => pw.length < 6 || pw.length > 100;
+const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const publicUser = u => ({ name: u.name, phone: u.phone });
 // Liga ao histórico da conta um agendamento que o cliente fez sem estar logado (ele precisa
 // ter o id, que só fica salvo no aparelho onde agendou, e o WhatsApp precisa ser o mesmo).
@@ -173,10 +197,95 @@ function pixPayload() {
 }
 function publicBooking(b) {
   const status = (b.status === 'pending' && Date.now() >= b.expiresAt) ? 'expired' : b.status;
-  return {
-    id: b.id, name: b.name, date: b.date, time: b.time, status, expiresAt: b.expiresAt,
-    pix: { payload: pixPayload(), key: PIX_KEY, name: PIX_NAME, amount: DEPOSIT }
-  };
+  const out = { id: b.id, name: b.name, date: b.date, time: b.time, status, expiresAt: b.expiresAt, amount: DEPOSIT };
+  if (b.checkoutUrl) out.checkoutUrl = b.checkoutUrl;
+  else out.pix = { payload: pixPayload(), key: PIX_KEY, name: PIX_NAME, amount: DEPOSIT };
+  return out;
+}
+
+// ---------- Mercado Pago (Checkout Pro) ----------
+async function mp(method, path, body, extraHeaders) {
+  const r = await fetch('https://api.mercadopago.com' + path, {
+    method,
+    headers: { Authorization: 'Bearer ' + MP_TOKEN, 'Content-Type': 'application/json', ...(extraHeaders || {}) },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    console.error('Mercado Pago', r.status, j);
+    const e = new Error('Mercado Pago indisponível'); e.status = r.status; throw e;
+  }
+  return j;
+}
+function siteUrl(req) {
+  if (SITE_URL) return SITE_URL;
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  return proto + '://' + host;
+}
+function createPreference(b, req) {
+  const base = siteUrl(req);
+  const back = base + '/?pagamento=' + b.id;
+  return mp('POST', '/checkout/preferences', {
+    items: [{ id: 'sinal', title: `Sinal - ${PIX_NAME} ${b.date.split('-').reverse().join('/')} ${b.time}`, quantity: 1, unit_price: +DEPOSIT, currency_id: 'BRL' }],
+    external_reference: b.id,
+    // Pix, crédito, débito e saldo do Mercado Pago. Boleto fica de fora (demora dias para compensar).
+    payment_methods: { excluded_payment_types: [{ id: 'ticket' }, { id: 'atm' }], installments: 1 },
+    back_urls: { success: back, pending: back, failure: back },
+    auto_return: 'approved',
+    notification_url: base + '/api/mp/webhook',
+    statement_descriptor: ascii(PIX_NAME, 22),
+    expires: true,
+    expiration_date_from: new Date(b.createdAt - 60000).toISOString(),
+    expiration_date_to: new Date(b.expiresAt).toISOString()
+  }, { 'X-Idempotency-Key': 'pref-' + b.id });
+}
+// Aplica ao agendamento o que o Mercado Pago diz sobre um pagamento. Os dados vêm sempre da API
+// do Mercado Pago com o nosso token, então um aviso falso no webhook não confirma nada.
+async function applyPayment(pay) {
+  const id = String(pay.external_reference || '');
+  if (!/^[a-f0-9]{32}$/.test(id)) return;
+  const b = await getBooking(id);
+  if (!b || !b.checkoutUrl) return;
+  if (pay.status === 'approved') {
+    if (b.status === 'confirmed' || b.status === 'refunded') {
+      if (b.mpPaymentId !== pay.id) await refundPayment(pay.id);   // pagou duas vezes: devolve a segunda
+      return;
+    }
+    if (b.status !== 'cancelled' && await takeSlot(b)) {
+      b.status = 'confirmed';
+    } else {
+      // O horário foi para outra pessoa (ou foi cancelado) antes de o pagamento cair: devolve o dinheiro.
+      await releaseSlot(b);
+      b.status = (await refundPayment(pay.id)) ? 'refunded' : 'refund_needed';
+    }
+    b.mpPaymentId = pay.id; b.paidAt = Date.now();
+    await saveBooking(b);
+  } else if ((pay.status === 'in_process' || pay.status === 'authorized') && b.status === 'pending') {
+    // Cartão em análise pelo Mercado Pago: segura o horário até sair a resposta.
+    if (await takeSlot(b)) { b.status = 'paid_claimed'; b.mpPaymentId = pay.id; await saveBooking(b); }
+  } else if (['rejected', 'cancelled', 'refunded', 'charged_back'].includes(pay.status) && b.status === 'paid_claimed' && b.mpPaymentId === pay.id) {
+    // Análise recusada: volta a ser uma reserva comum (que vence no horário de sempre).
+    b.status = 'pending';
+    const left = b.expiresAt - Date.now();
+    if (left <= 0) await releaseSlot(b);
+    else await redis('EVAL', LUA_HOLD, 1, slotKey(b.date, b.time), b.id, Math.round(left + HOLD_GRACE_MS));
+    await saveBooking(b);
+  }
+}
+async function refundPayment(paymentId) {
+  try { await mp('POST', `/v1/payments/${paymentId}/refunds`, {}, { 'X-Idempotency-Key': 'refund-' + paymentId }); return true; }
+  catch (_) { return false; }
+}
+// Consulta os pagamentos de um agendamento. Cobre o caso de o aviso (webhook) do Mercado Pago atrasar ou se perder.
+async function syncBooking(b) {
+  if (!MP_TOKEN || !b.checkoutUrl || !['pending', 'paid_claimed'].includes(b.status)) return b;
+  if ((await redis('SET', 'sync:' + b.id, '1', 'NX', 'EX', 4)) !== 'OK') return b;
+  const r = await mp('GET', '/v1/payments/search?external_reference=' + b.id + '&sort=date_created&criteria=desc');
+  const list = r.results || [];
+  const best = list.find(x => x.status === 'approved') || list.find(x => x.status === 'in_process' || x.status === 'authorized') || list[0];
+  if (best) await applyPayment(best);
+  return (await getBooking(b.id)) || b;
 }
 
 // ---------- Utilidades HTTP ----------
@@ -209,7 +318,7 @@ async function route(req, res, p, query, readJson) {
   const method = req.method;
 
   if (method === 'GET' && p === '/config') {
-    return send(res, 200, { name: 'Thiago Barbearia', deposit: DEPOSIT, holdMin: HOLD_MIN, days: openDays(), pixConfigured: !!PIX_KEY });
+    return send(res, 200, { name: 'Thiago Barbearia', deposit: DEPOSIT, holdMin: HOLD_MIN, days: openDays(), pixConfigured: !!(PIX_KEY || MP_TOKEN), checkout: MP_TOKEN ? 'mercadopago' : 'pix', whatsapp: WHATSAPP });
   }
 
   if (method === 'GET' && p === '/slots') {
@@ -219,7 +328,7 @@ async function route(req, res, p, query, readJson) {
   }
 
   if (method === 'POST' && p === '/book') {
-    if (!PIX_KEY) return send(res, 503, { error: 'Pagamento ainda não configurado.' });
+    if (!PIX_KEY && !MP_TOKEN) return send(res, 503, { error: 'Pagamento ainda não configurado.' });
     const { name, phone, date, time } = await readJson();
     const user = await currentUser(req);
     const cleanName = String(name || '').trim().slice(0, 60);
@@ -244,6 +353,13 @@ async function route(req, res, p, query, readJson) {
       await releaseSlot(b);
       return send(res, 429, { error: 'Você já tem reservas aguardando pagamento. Conclua ou aguarde expirar.' });
     }
+    if (MP_TOKEN) {
+      try { b.checkoutUrl = (await createPreference(b, req)).init_point; }
+      catch (e) {
+        await releaseSlot(b);
+        return send(res, 502, { error: 'Não foi possível abrir o pagamento agora. Tente novamente em instantes.' });
+      }
+    }
     const cmds = [['SET', 'b:' + b.id, JSON.stringify(b), 'EX', BOOKING_TTL], ['SADD', 'ids', b.id]];
     if (user) cmds.push(['SADD', 'ubk:' + user.phone, b.id]);
     await redisPipe(cmds);
@@ -264,7 +380,7 @@ async function route(req, res, p, query, readJson) {
     if (p === '/auth/register') {
       const cleanName = String(name || '').trim().slice(0, 60);
       if (cleanName.length < 2) return send(res, 400, { error: 'Informe seu nome.' });
-      if (pw.length < 6 || pw.length > 100) return send(res, 400, { error: 'A senha precisa ter pelo menos 6 caracteres.' });
+      if (badPassword(pw)) return send(res, 400, { error: 'A senha precisa ter pelo menos 6 caracteres.' });
       const salt = crypto.randomBytes(16).toString('hex');
       user = { phone: digits, name: cleanName, salt, hash: await scrypt(pw, salt), createdAt: Date.now() };
       if ((await redis('SET', 'user:' + digits, JSON.stringify(user), 'NX')) !== 'OK') {
@@ -280,7 +396,41 @@ async function route(req, res, p, query, readJson) {
       }
     }
     await attachBooking(user, bookingId);
-    return send(res, 200, { token: await newSession(digits), user: publicUser(user) });
+    return send(res, 200, { token: await newSession(user), user: publicUser(user) });
+  }
+  // Esqueci a senha: o dono gera o código no painel e manda pelo WhatsApp do cliente.
+  if (method === 'POST' && p === '/auth/reset') {
+    const { phone, code, password } = await readJson();
+    const digits = normPhone(phone);
+    const pw = String(password || '');
+    if (!validPhone(digits)) return send(res, 400, { error: 'Informe um WhatsApp válido com DDD.' });
+    if (badPassword(pw)) return send(res, 400, { error: 'A nova senha precisa ter pelo menos 6 caracteres.' });
+    const saved = await redis('GET', 'reset:' + digits);
+    if (!saved) return send(res, 400, { error: 'Código inválido ou vencido. Peça um novo código.' });
+    const given = sha(digits + ':' + String(code || '').replace(/\D/g, ''));
+    if (given !== saved) {
+      // 5 tentativas erradas e o código deixa de valer.
+      const [n] = await redisPipe([['INCR', 'rfail:' + digits], ['EXPIRE', 'rfail:' + digits, RESET_TTL, 'NX']]);
+      if (n >= 5) await redisPipe([['DEL', 'reset:' + digits], ['DEL', 'rfail:' + digits]]);
+      return send(res, 400, { error: n >= 5 ? 'Código errado muitas vezes. Peça um novo código.' : 'Código incorreto.' });
+    }
+    const user = await getUser(digits);
+    if (!user) return send(res, 400, { error: 'Código inválido ou vencido. Peça um novo código.' });
+    await setPassword(user, pw);
+    await redisPipe([['DEL', 'reset:' + digits], ['DEL', 'rfail:' + digits], ['DEL', 'lfailp:' + digits]]);
+    return send(res, 200, { token: await newSession(user), user: publicUser(user) });
+  }
+  if (method === 'POST' && p === '/auth/password') {
+    const user = await currentUser(req);
+    if (!user) return send(res, 401, { error: 'Entre na sua conta para ver seus agendamentos.' });
+    const { current, password } = await readJson();
+    const pw = String(password || ''), cur = String(current || '');
+    const ok = cur.length <= 100 &&
+      crypto.timingSafeEqual(Buffer.from(await scrypt(cur, user.salt), 'hex'), Buffer.from(user.hash, 'hex'));
+    if (!ok) return send(res, 400, { error: 'Senha atual incorreta.' });
+    if (badPassword(pw)) return send(res, 400, { error: 'A nova senha precisa ter pelo menos 6 caracteres.' });
+    await setPassword(user, pw);
+    return send(res, 200, { token: await newSession(user), user: publicUser(user) });
   }
   if (method === 'POST' && p === '/auth/logout') {
     const token = bearer(req);
@@ -306,12 +456,31 @@ async function route(req, res, p, query, readJson) {
 
   let m;
   if ((m = p.match(/^\/booking\/([a-f0-9]{32})$/)) && method === 'GET') {
-    const b = await getBooking(m[1]);
+    let b = await getBooking(m[1]);
+    if (b) { try { b = await syncBooking(b); } catch (_) { /* Mercado Pago fora do ar: mostra o que já sabemos */ } }
     return b ? send(res, 200, publicBooking(b)) : send(res, 404, { error: 'Agendamento não encontrado.' });
+  }
+  // Aviso do Mercado Pago de que um pagamento mudou. Respondemos 200 sempre, para ele não reenviar sem fim.
+  if (p === '/mp/webhook' && (method === 'POST' || method === 'GET')) {
+    if (!MP_TOKEN) return send(res, 200, { ok: true });
+    let body = {};
+    try { body = method === 'POST' ? await readJson() : {}; } catch (_) {}
+    const type = body.type || body.topic || query.type || query.topic;
+    const id = String((body.data && body.data.id) || query['data.id'] || (type === 'payment' && (query.id || body.id)) || '');
+    if (type === 'payment' && /^\d{1,20}$/.test(id)) {
+      try { await applyPayment(await mp('GET', '/v1/payments/' + id)); }
+      catch (e) {
+        // Pagamento inexistente (ex.: o teste do painel do Mercado Pago): nada a fazer.
+        if (e.status === 404) return send(res, 200, { ok: true });
+        console.error(e); return send(res, 500, { error: 'tente de novo' });   // 500 faz o Mercado Pago tentar de novo
+      }
+    }
+    return send(res, 200, { ok: true });
   }
   if ((m = p.match(/^\/booking\/([a-f0-9]{32})\/paid$/)) && method === 'POST') {
     const b = await getBooking(m[1]);
     if (!b) return send(res, 404, { error: 'Agendamento não encontrado.' });
+    if (b.checkoutUrl) return send(res, 200, publicBooking(b));   // pelo Mercado Pago a confirmação é automática
     if (b.status === 'pending') {
       const expired = Date.now() >= b.expiresAt;
       if (expired || !(await claimSlot(b))) return send(res, 410, { error: 'O tempo para pagamento acabou. Escolha o horário novamente.' });
@@ -342,9 +511,9 @@ async function route(req, res, p, query, readJson) {
         if (stale.length) await redis('SREM', 'ids', ...stale);
       }
       const bookings = recs
-        .filter(b => b.date >= today && b.status !== 'cancelled' && (b.status !== 'pending' || Date.now() < b.expiresAt))
+        .filter(b => b.date >= today && !['cancelled', 'refunded'].includes(b.status) && (b.status !== 'pending' || Date.now() < b.expiresAt))
         .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
-        .map(b => ({ id: b.id, name: b.name, phone: b.phone, date: b.date, time: b.time, status: b.status }));
+        .map(b => ({ id: b.id, name: b.name, phone: b.phone, date: b.date, time: b.time, status: b.status, mp: !!b.checkoutUrl }));
       const all = await redis('SMEMBERS', 'blocks');
       const old = all.filter(s => s.split('|')[0] < today);
       if (old.length) await redis('SREM', 'blocks', ...old);
@@ -366,6 +535,14 @@ async function route(req, res, p, query, readJson) {
       await saveBooking(b);
       return send(res, 200, { ok: true });
     }
+    if (method === 'POST' && p === '/admin/reset-code') {
+      const digits = normPhone((await readJson()).phone);
+      const user = validPhone(digits) && await getUser(digits);
+      if (!user) return send(res, 404, { error: 'Nenhuma conta com esse WhatsApp.' });
+      const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      await redisPipe([['SET', 'reset:' + digits, sha(digits + ':' + code), 'EX', RESET_TTL], ['DEL', 'rfail:' + digits]]);
+      return send(res, 200, { code, name: user.name, phone: digits, minutes: RESET_TTL / 60 });
+    }
     if (method === 'POST' && (p === '/admin/block' || p === '/admin/unblock')) {
       const { date, time } = await readJson();
       if (!validDate(date) || (time !== null && time !== undefined && time !== '' && !SLOTS.includes(time))) return send(res, 400, { error: 'Dados inválidos.' });
@@ -384,7 +561,8 @@ module.exports = async (req, res) => {
     if (Array.isArray(p)) p = p.join('/');
     if (!p) p = url.pathname.replace(/^\/api\/?/, '');
     p = '/' + String(p).replace(/^\/+|\/+$/g, '');
-    const query = { date: (req.query && req.query.date) || url.searchParams.get('date') };
+    const q = k => (req.query && req.query[k]) || url.searchParams.get(k);
+    const query = { date: q('date'), type: q('type'), topic: q('topic'), id: q('id'), 'data.id': q('data.id') };
     return await route(req, res, p, query, () => readBody(req));
   } catch (e) {
     console.error(e);

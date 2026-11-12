@@ -97,8 +97,41 @@
       <label for="aPass">Senha</label>
       <input id="aPass" type="password" autocomplete="current-password" maxlength="100" placeholder="Mínimo 6 caracteres">
       <button class="btn" id="authGo">Entrar</button>
+      <p class="center" style="margin:12px 0 0"><button class="link" id="forgot">Esqueci minha senha</button></p>
       <button class="btn alt" id="authBack">Voltar</button>
       <div class="err" id="authErr"></div>
+    </div>
+  </div>
+
+  <!-- Esqueci a senha -->
+  <div id="stepReset" class="hide">
+    <div class="card">
+      <h2>Criar uma nova senha</h2>
+      <p class="summary">Peça ao Thiago um código pelo WhatsApp. Ele vale por 30 minutos.</p>
+      <a class="btn alt hide" id="askCode" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">Pedir código no WhatsApp</a>
+      <label for="rPhone">Seu WhatsApp (com DDD)</label>
+      <input id="rPhone" type="tel" autocomplete="tel" placeholder="(11) 90000-0000">
+      <label for="rCode">Código</label>
+      <input id="rCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 números">
+      <label for="rPass">Nova senha</label>
+      <input id="rPass" type="password" autocomplete="new-password" maxlength="100" placeholder="Mínimo 6 caracteres">
+      <button class="btn" id="resetGo">Salvar nova senha</button>
+      <button class="btn alt" id="resetBack">Voltar</button>
+      <div class="err" id="resetErr"></div>
+    </div>
+  </div>
+
+  <!-- Trocar senha (logado) -->
+  <div id="stepPass" class="hide">
+    <div class="card">
+      <h2>Trocar senha</h2>
+      <label for="pCur">Senha atual</label>
+      <input id="pCur" type="password" autocomplete="current-password" maxlength="100">
+      <label for="pNew">Nova senha</label>
+      <input id="pNew" type="password" autocomplete="new-password" maxlength="100" placeholder="Mínimo 6 caracteres">
+      <button class="btn" id="passGo">Salvar nova senha</button>
+      <button class="btn alt" id="passBack">Voltar</button>
+      <div class="err" id="passErr"></div>
     </div>
   </div>
 
@@ -108,7 +141,23 @@
       <h2 id="histHello">Meus agendamentos</h2>
       <div id="histList"><span class="summary">Carregando…</span></div>
       <button class="btn" id="histNew">Fazer novo agendamento</button>
+      <button class="btn alt" id="changePass">Trocar senha</button>
       <button class="btn alt" id="logout">Sair da conta</button>
+      <p class="summary center hide" id="passOk" style="margin-top:12px;color:var(--ok)">Senha alterada.</p>
+    </div>
+  </div>
+
+  <!-- Passo 2: pagamento pelo Mercado Pago -->
+  <div id="stepMp" class="hide">
+    <div class="card">
+      <h2>Pague o sinal de R$ <span id="mpAmount">20,00</span></h2>
+      <p class="summary" id="mpSummary"></p>
+      <div class="timer" id="mpTimer">15:00</div>
+      <p class="summary center">Seu horário está reservado por este tempo.</p>
+      <a class="btn" id="mpGo" style="display:block;text-align:center;text-decoration:none">Pagar com Pix ou cartão</a>
+      <p class="summary center" style="font-size:13px">Pix, cartão de crédito ou débito, no ambiente seguro do Mercado Pago. O horário é confirmado assim que o pagamento for aprovado.</p>
+      <p class="summary center hide" id="mpWait" style="font-size:13px">Já pagou? Esta tela atualiza sozinha em alguns segundos.</p>
+      <div class="err" id="mpErr"></div>
     </div>
   </div>
 
@@ -156,7 +205,7 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error(j.error || 'Algo deu errado. Tente novamente.');
   return j;
 }
-function show(step) { for (const s of ['stepPick','stepPay','stepDone','stepLogin','stepHistory']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
+function show(step) { for (const s of ['stepPick','stepPay','stepMp','stepDone','stepLogin','stepHistory','stepReset','stepPass']) $(s).classList.toggle('hide', s !== step); window.scrollTo(0,0); }
 
 async function init() {
   cfg = await api('/api/config');
@@ -174,6 +223,9 @@ async function init() {
     try { user = (await api('/api/me')).user; } catch (_) { setToken(null); }
   }
   applyUser();
+  // Na volta do Mercado Pago o endereço traz o agendamento (o navegador pode ser outro, como o app do banco).
+  const back = new URLSearchParams(location.search).get('pagamento');
+  if (back && /^[a-f0-9]{32}$/.test(back)) localStorage.setItem('tb_booking', back);
   const saved = localStorage.getItem('tb_booking');
   if (saved) { try { booking = await api('/api/booking/' + saved); route(); return; } catch (_) { localStorage.removeItem('tb_booking'); } }
   show('stepPick');
@@ -217,13 +269,35 @@ $('goPay').onclick = async () => {
 function route() {
   clearInterval(tick); clearInterval(poll);
   const s = booking.status;
-  if (s === 'pending') return showPay();
+  if (s === 'pending') {
+    if (booking.checkoutUrl) { showMp(); poll = setInterval(refresh, 5000); return; }
+    return showPay();
+  }
   showDone();
-  if (s === 'paid_claimed') poll = setInterval(refresh, 10000);
+  if (s === 'paid_claimed') poll = setInterval(refresh, booking.checkoutUrl ? 5000 : 10000);
 }
 async function refresh() {
-  try { booking = await api('/api/booking/' + booking.id); if (booking.status !== 'paid_claimed') { clearInterval(poll); showDone(); } } catch (_) {}
+  try {
+    const before = booking.status;
+    booking = await api('/api/booking/' + booking.id);
+    if (booking.status !== before || !['pending','paid_claimed'].includes(booking.status)) route();
+  } catch (_) {}
 }
+
+function showMp() {
+  show('stepMp');
+  $('mpAmount').textContent = booking.amount.replace('.', ',');
+  $('mpSummary').innerHTML = `<b>${booking.name}</b> · ${weekName(booking.date)}, <b>${brDate(booking.date)}</b> às <b>${booking.time}</b>`;
+  $('mpGo').href = booking.checkoutUrl;
+  $('mpWait').classList.toggle('hide', !/[?&]pagamento=/.test(location.search));
+  const upd = () => {
+    const left = Math.max(0, booking.expiresAt - Date.now());
+    $('mpTimer').textContent = String(Math.floor(left/60000)).padStart(2,'0') + ':' + String(Math.floor(left/1000)%60).padStart(2,'0');
+    if (left <= 0) { clearInterval(tick); refresh(); }
+  };
+  upd(); tick = setInterval(upd, 1000);
+}
+$('mpGo').onclick = () => { $('mpWait').classList.remove('hide'); };
 
 function showPay() {
   show('stepPay');
@@ -254,7 +328,11 @@ function showDone() {
   show('stepDone');
   const when = `${weekName(booking.date)}, ${brDate(booking.date)} às ${booking.time}`;
   const map = {
-    paid_claimed: ['b-wait','Aguardando confirmação','⏳ Pagamento em análise', `Recebemos o aviso do seu Pix para ${when}. Assim que o Thiago conferir, seu horário será confirmado. Esta tela atualiza sozinha.`],
+    paid_claimed: ['b-wait','Aguardando confirmação','⏳ Pagamento em análise', booking.checkoutUrl
+      ? `O Mercado Pago está analisando seu pagamento para ${when}. Seu horário fica guardado até sair a resposta. Esta tela atualiza sozinha.`
+      : `Recebemos o aviso do seu Pix para ${when}. Assim que o Thiago conferir, seu horário será confirmado. Esta tela atualiza sozinha.`],
+    refunded: ['b-bad','Pagamento devolvido','Horário indisponível', 'Seu pagamento foi aprovado depois que o horário já tinha sido ocupado, por isso o valor foi devolvido automaticamente. Faça um novo agendamento.'],
+    refund_needed: ['b-bad','Horário indisponível','Horário indisponível', 'Seu pagamento foi aprovado depois que o horário já tinha sido ocupado. O Thiago vai devolver o valor; se precisar, chame no WhatsApp.'],
     confirmed: ['b-ok','Horário confirmado','✅ Tudo certo, '+booking.name+'!', `Te esperamos ${when}. Se precisar remarcar, chame no WhatsApp com antecedência.`],
     expired: ['b-bad','Reserva expirada','Tempo esgotado', 'O pagamento não foi feito a tempo e o horário foi liberado. Faça um novo agendamento.'],
     cancelled: ['b-bad','Cancelado','Agendamento cancelado', 'Este horário foi cancelado. Você pode fazer um novo agendamento.']
@@ -263,7 +341,7 @@ function showDone() {
   $('doneBadge').innerHTML = `<span class="badge ${cls}">${badge}</span>`;
   $('doneTitle').textContent = title; $('doneText').textContent = text;
   $('again').classList.toggle('hide', booking.status === 'paid_claimed');
-  if (['expired','cancelled'].includes(booking.status)) localStorage.removeItem('tb_booking');
+  if (['expired','cancelled','refunded','refund_needed'].includes(booking.status)) localStorage.removeItem('tb_booking');
 }
 // ---------- Conta ----------
 function setToken(t) {
@@ -311,21 +389,55 @@ $('logout').onclick = async () => {
   try { await api('/api/auth/logout', { method:'POST' }); } catch (_) {}
   setToken(null); $('name').value = ''; $('phone').value = ''; applyUser(); backToStart();
 };
+$('forgot').onclick = () => {
+  $('rPhone').value = $('aPhone').value; $('rCode').value = ''; $('rPass').value = ''; $('resetErr').textContent = '';
+  if (cfg.whatsapp) {
+    $('askCode').href = 'https://wa.me/' + (cfg.whatsapp.length <= 11 ? '55' + cfg.whatsapp : cfg.whatsapp) +
+      '?text=' + encodeURIComponent('Olá! Esqueci a senha do site de agendamento. Pode me mandar um código para criar uma nova?');
+    $('askCode').classList.remove('hide');
+  }
+  show('stepReset');
+};
+$('resetBack').onclick = () => show('stepLogin');
+$('resetGo').onclick = async () => {
+  $('resetErr').textContent = ''; $('resetGo').disabled = true;
+  try {
+    const r = await api('/api/auth/reset', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ phone: $('rPhone').value, code: $('rCode').value, password: $('rPass').value }) });
+    setToken(r.token); user = r.user; $('rPass').value = '';
+    applyUser(); await openHistory(); $('passOk').classList.remove('hide');
+  } catch (e) { $('resetErr').textContent = e.message; }
+  $('resetGo').disabled = false;
+};
+$('changePass').onclick = () => { $('pCur').value = ''; $('pNew').value = ''; $('passErr').textContent = ''; show('stepPass'); };
+$('passBack').onclick = () => openHistory();
+$('passGo').onclick = async () => {
+  $('passErr').textContent = ''; $('passGo').disabled = true;
+  try {
+    const r = await api('/api/auth/password', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ current: $('pCur').value, password: $('pNew').value }) });
+    setToken(r.token); user = r.user; $('pCur').value = ''; $('pNew').value = '';
+    await openHistory(); $('passOk').classList.remove('hide');
+  } catch (e) { $('passErr').textContent = e.message; }
+  $('passGo').disabled = false;
+};
+
 $('histNew').onclick = () => { try { localStorage.removeItem('tb_booking'); } catch (_) {} booking = null; backToStart(); };
 
 const HIST = {
   pending: ['b-wait','Aguardando Pix'], paid_claimed: ['b-wait','Em análise'], confirmed: ['b-ok','Confirmado'],
-  done: ['b-muted','Realizado'], expired: ['b-bad','Expirado'], cancelled: ['b-bad','Cancelado']
+  done: ['b-muted','Realizado'], expired: ['b-bad','Expirado'], cancelled: ['b-bad','Cancelado'],
+  refunded: ['b-bad','Devolvido'], refund_needed: ['b-bad','Devolução pendente']
 };
 async function openHistory() {
-  show('stepHistory');
+  show('stepHistory'); $('passOk').classList.add('hide');
   $('histHello').textContent = `Olá, ${user.name.split(' ')[0]}! Seus agendamentos`;
   $('histList').innerHTML = '<span class="summary">Carregando…</span>';
   try {
     const r = await api('/api/me');
     user = r.user;
     const today = new Date().toLocaleString('sv-SE', { timeZone: 'America/Sao_Paulo' }).slice(0, 10);
-    const next = r.bookings.filter(b => b.date >= today && !['expired','cancelled'].includes(b.status)).reverse();
+    const next = r.bookings.filter(b => b.date >= today && !['expired','cancelled','refunded','refund_needed'].includes(b.status)).reverse();
     const past = r.bookings.filter(b => !next.includes(b));
     $('histList').innerHTML = '';
     if (!r.bookings.length) { $('histList').innerHTML = '<p class="summary">Você ainda não tem agendamentos nesta conta.</p>'; return; }
