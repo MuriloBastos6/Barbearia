@@ -27,6 +27,7 @@
   .muted { color:var(--muted); font-size:13px; }
   .badge { padding:3px 9px; border-radius:20px; font-size:12px; font-weight:600; white-space:nowrap; }
   .b-wait { background:#3a3118; color:var(--gold); } .b-ok { background:#173a2a; color:var(--ok); } .b-pend { background:#2a2a2a; color:var(--muted); }
+  .b-bad { background:#3a1d18; color:var(--bad); }
   .actions { display:flex; gap:8px; margin-top:10px; }
   .err { color:var(--bad); font-size:14px; min-height:18px; margin-top:8px; }
   .hide { display:none; }
@@ -52,7 +53,7 @@
         <h2 style="margin:0">Agendamentos</h2>
         <button id="reload">Atualizar</button>
       </div>
-      <p class="muted" style="margin:6px 0 0">Confira o Pix de R$ 20 no seu banco e toque em <b>Confirmar</b>. A tela atualiza sozinha a cada 20 s.</p>
+      <p class="muted" style="margin:6px 0 0">Pagamentos pelo Mercado Pago se confirmam sozinhos. No Pix manual, confira o valor no seu banco e toque em <b>Confirmar</b>. A tela atualiza sozinha a cada 20 s.</p>
       <div id="list"></div>
     </div>
 
@@ -108,7 +109,12 @@ async function load() {
   let last = '';
   o.bookings.forEach(b => {
     if (b.date !== last) { last = b.date; const h = document.createElement('div'); h.className = 'date'; h.textContent = `${weekName(b.date)}, ${brDate(b.date)}`; L.appendChild(h); }
-    const lab = { confirmed:['b-ok','Confirmado'], paid_claimed:['b-wait','Cliente disse que pagou'], pending:['b-pend','Aguardando Pix'] }[b.status];
+    const lab = {
+      confirmed: ['b-ok', b.mp ? 'Pago no Mercado Pago' : 'Confirmado'],
+      paid_claimed: ['b-wait', b.mp ? 'Pagamento em análise' : 'Cliente disse que pagou'],
+      pending: ['b-pend', b.mp ? 'Aguardando pagamento' : 'Aguardando Pix'],
+      refund_needed: ['b-bad', 'Devolver sinal no Mercado Pago']
+    }[b.status] || ['b-pend', b.status];
     const it = document.createElement('div'); it.className = 'item';
     const top = document.createElement('div'); top.className = 'top';
     const left = document.createElement('div');
@@ -120,7 +126,7 @@ async function load() {
     const badge = document.createElement('span'); badge.className = 'badge ' + lab[0]; badge.textContent = lab[1];
     top.append(left, badge); it.appendChild(top);
     const act = document.createElement('div'); act.className = 'actions';
-    if (b.status !== 'confirmed') { const c = document.createElement('button'); c.className = 'ok'; c.textContent = '✔ Confirmar'; c.onclick = () => act1(b.id, 'confirm'); act.appendChild(c); }
+    if (!['confirmed','refund_needed'].includes(b.status)) { const c = document.createElement('button'); c.className = 'ok'; c.textContent = '✔ Confirmar'; c.onclick = () => act1(b.id, 'confirm'); act.appendChild(c); }
     const x = document.createElement('button'); x.className = 'bad'; x.textContent = 'Cancelar'; x.onclick = () => { if (confirm(`Cancelar ${b.name} às ${b.time}?`)) act1(b.id, 'cancel'); };
     act.appendChild(x); it.appendChild(act); L.appendChild(it);
   });
